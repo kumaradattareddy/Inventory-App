@@ -181,7 +181,7 @@ def _to_float(txt: str) -> float:
     except:
         return 0.0
 
-# ---------- ROW FORM (improved UX) ----------
+# ---------- ROW FORM (improved & fixed) ----------
 def ensure_rows(session_key: str, start_rows: int = 6):
     if session_key not in st.session_state:
         st.session_state[session_key] = [
@@ -194,19 +194,17 @@ def _row_amount(qty_txt: str, rate_txt: str) -> float:
 
 def row_form(session_key: str, title: str):
     """
-    Robust row editor:
-    - Does NOT rerun while typing (wrapped in st.form)
-    - Clean header row (no ASCII table)
-    - Per-row 'Amount' preview
-    - Delete via checkbox processed on submit
-    - Grand total shown below
+    Row editor:
+    - inputs are wrapped in a form so typing doesn't rerun
+    - deletion is done via checkboxes processed on submit
+    - amounts/subtotal are recalculated on submit and shown
     """
     ensure_rows(session_key)
     rows = st.session_state[session_key]
 
     st.markdown(f"#### {title}")
 
-    # Top controls (outside form so they only trigger on click)
+    # top-level controls (don't force rerun while typing)
     c1, c2, c3 = st.columns([1,1,6])
     with c1:
         if st.button("➕ Add row", key=f"add_{session_key}"):
@@ -219,14 +217,15 @@ def row_form(session_key: str, title: str):
                 for _ in range(6)
             ]
             st.rerun()
-    st.caption("Tip: type freely; updates apply when you press **Update Items**.")
+    st.caption("Tip: type freely; the table won’t refresh until you click **Update Items**.")
 
     subtotal_key = f"{session_key}_subtotal"
     if subtotal_key not in st.session_state:
         st.session_state[subtotal_key] = 0.0
 
-    with st.form(f"form_{session_key}", clear_on_submit=False, border=True):
-        # Column labels (once)
+    # form to avoid reruns while typing
+    with st.form(f"form_{session_key}", clear_on_submit=False):
+        # labels
         lab = st.columns([2.0,1.3,0.9,1.0,1.0,1.3,2.0,1.0,0.5])
         lab[0].markdown("**Product Name**")
         lab[1].markdown("**Size (req)**")
@@ -238,33 +237,37 @@ def row_form(session_key: str, title: str):
         lab[7].markdown("**Amount**")
         lab[8].markdown("**Del**")
 
-        # Render each row
+        # per-row widgets
         for i, r in enumerate(rows):
-            col = st.columns([2.0,1.3,0.9,1.0,1.0,1.3,2.0,1.0,0.5])
-            with col[0]:
+            cols = st.columns([2.0,1.3,0.9,1.0,1.0,1.3,2.0,1.0,0.5])
+            with cols[0]:
                 st.text_input("", value=r["product_name"], key=f"{session_key}_name_{i}", placeholder="e.g., Renite")
-            with col[1]:
+            with cols[1]:
                 st.text_input("", value=r["size"], key=f"{session_key}_size_{i}", placeholder="e.g., 600x600")
-            with col[2]:
-                st.text_input("", value=r["qty"], key=f"{session_key}_qty_{i}", placeholder="")  # keeps blank if empty
-            with col[3]:
+            with cols[2]:
+                st.text_input("", value=r["qty"], key=f"{session_key}_qty_{i}", placeholder="")
+            with cols[3]:
                 st.text_input("", value=r["rate"], key=f"{session_key}_rate_{i}", placeholder="")
-            with col[4]:
+            with cols[4]:
                 st.text_input("", value=r["unit"], key=f"{session_key}_unit_{i}", placeholder="pcs/boxes/sq_ft/bags/kgs")
-            with col[5]:
+            with cols[5]:
                 st.text_input("", value=r["material"], key=f"{session_key}_mat_{i}", placeholder="Tiles/Granites/Marble/…")
-            with col[6]:
+            with cols[6]:
                 st.text_input("", value=r["comments"], key=f"{session_key}_cmt_{i}", placeholder="")
-            with col[7]:
-                amt = _row_amount(r.get("qty",""), r.get("rate",""))
+            # Show amount based on the latest widget values if available (after submit/rerun)
+            qty_widget_val = st.session_state.get(f"{session_key}_qty_{i}", r.get("qty",""))
+            rate_widget_val = st.session_state.get(f"{session_key}_rate_{i}", r.get("rate",""))
+            amt = _row_amount(qty_widget_val, rate_widget_val)
+            with cols[7]:
                 st.markdown(f"<div style='padding-top:6px;font-weight:600'>₹ {amt:,.2f}</div>", unsafe_allow_html=True)
-            with col[8]:
+            with cols[8]:
                 st.checkbox("", value=False, key=f"{session_key}_del_{i}")
 
         submitted = st.form_submit_button("Update Items")
 
         if submitted:
-            new_rows, subtotal = [], 0.0
+            new_rows = []
+            subtotal = 0.0
             for i, _r in enumerate(rows):
                 name = st.session_state.get(f"{session_key}_name_{i}", "")
                 size = st.session_state.get(f"{session_key}_size_{i}", "")
@@ -277,8 +280,13 @@ def row_form(session_key: str, title: str):
 
                 if not mark_del:
                     new_rows.append({
-                        "product_name": name, "size": size, "qty": qty, "rate": rate,
-                        "unit": unit, "material": mat, "comments": cmt
+                        "product_name": name,
+                        "size": size,
+                        "qty": qty,
+                        "rate": rate,
+                        "unit": unit,
+                        "material": mat,
+                        "comments": cmt
                     })
 
                 subtotal += _to_float(qty) * _to_float(rate)
@@ -288,7 +296,9 @@ def row_form(session_key: str, title: str):
                 for _ in range(6)
             ]
             st.session_state[subtotal_key] = subtotal
-            st.experimental_rerun()
+
+            # Use st.rerun() (works across streamlit versions consistently in this app)
+            st.rerun()
 
     st.markdown(f"**Subtotal:** ₹ {st.session_state[subtotal_key]:,.2f}")
     return st.session_state[session_key], st.session_state[subtotal_key]
@@ -414,6 +424,7 @@ with tabs[1]:
     rows_in, subtotal_in = row_form("rows_purchase", "Items")
     if st.button("Save Purchase Bill", key="save_purchase_bill"):
         try:
+            # decide defaults only now
             def first_non_blank(items, key, fallback):
                 for r in items:
                     val = (r.get(key) or "").strip()
