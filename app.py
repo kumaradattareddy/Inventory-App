@@ -210,12 +210,12 @@ def row_form(session_key: str, title: str):
     c1, c2, _ = st.columns([1,1,6])
     with c1:
         if st.button("➕ Add row", key=f"add_{session_key}"):
-            rows.append({"material":"","product_name":"","size":"","unit":"","qty":"","rate":""})
+            rows.append({"material":"","size":"","product_name":"","unit":"","qty":"","rate":""})
             st.rerun()
     with c2:
         if st.button("🧹 Clear", key=f"clear_{session_key}"):
             st.session_state[session_key] = [
-                {"material":"","product_name":"","size":"","unit":"","qty":"","rate":""} for _ in range(6)
+                {"material":"","size":"","prodcut_name":"","unit":"","qty":"","rate":""} for _ in range(6)
             ]
             st.rerun()
     st.caption("Tip: type freely; the table won’t refresh until you click **Update Items**.")
