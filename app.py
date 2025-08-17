@@ -123,7 +123,7 @@ label { font-size: 18px !important; }
 
 init_db()
 
-st.title("🧱 Tiles & Granite Inventory (Simple)")
+st.title("Tiles & Granite Inventory")
 
 tabs = st.tabs([
     "➕ Add Products",
