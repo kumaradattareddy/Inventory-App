@@ -181,7 +181,7 @@ def _to_float(txt: str) -> float:
     except:
         return 0.0
 
-# ---------- ROW FORM (no data_editor) ----------
+# ---------- ROW FORM (improved UX) ----------
 def ensure_rows(session_key: str, start_rows: int = 6):
     if session_key not in st.session_state:
         st.session_state[session_key] = [
@@ -189,14 +189,24 @@ def ensure_rows(session_key: str, start_rows: int = 6):
             for _ in range(start_rows)
         ]
 
+def _row_amount(qty_txt: str, rate_txt: str) -> float:
+    return _to_float(qty_txt) * _to_float(rate_txt)
+
 def row_form(session_key: str, title: str):
-    """Render a row editor that DOES NOT rerun while typing.
-       Edits apply when you press 'Update Items'."""
+    """
+    Robust row editor:
+    - Does NOT rerun while typing (wrapped in st.form)
+    - Clean header row (no ASCII table)
+    - Per-row 'Amount' preview
+    - Delete via checkbox processed on submit
+    - Grand total shown below
+    """
     ensure_rows(session_key)
     rows = st.session_state[session_key]
 
     st.markdown(f"#### {title}")
-    # Controls (outside the form – these will rerun only when clicked)
+
+    # Top controls (outside form so they only trigger on click)
     c1, c2, c3 = st.columns([1,1,6])
     with c1:
         if st.button("➕ Add row", key=f"add_{session_key}"):
@@ -209,52 +219,52 @@ def row_form(session_key: str, title: str):
                 for _ in range(6)
             ]
             st.rerun()
-    st.caption("Tip: type freely; the table won’t refresh until you click **Update Items**.")
+    st.caption("Tip: type freely; updates apply when you press **Update Items**.")
 
-    # Keep a subtotal in session so we can show it even before first submit
     subtotal_key = f"{session_key}_subtotal"
     if subtotal_key not in st.session_state:
         st.session_state[subtotal_key] = 0.0
 
-    # The form prevents rerun on each keystroke
-    with st.form(f"form_{session_key}", clear_on_submit=False):
-        # Header
-        st.write("| Product Name | Size (req) | Qty | Rate | Unit | Material | Comments | Del |")
-        st.write("| --- | --- | ---:| ---:| --- | --- | --- | :-: |")
+    with st.form(f"form_{session_key}", clear_on_submit=False, border=True):
+        # Column labels (once)
+        lab = st.columns([2.0,1.3,0.9,1.0,1.0,1.3,2.0,1.0,0.5])
+        lab[0].markdown("**Product Name**")
+        lab[1].markdown("**Size (req)**")
+        lab[2].markdown("**Qty**")
+        lab[3].markdown("**Rate**")
+        lab[4].markdown("**Unit**")
+        lab[5].markdown("**Material**")
+        lab[6].markdown("**Comments**")
+        lab[7].markdown("**Amount**")
+        lab[8].markdown("**Del**")
 
-        # Render each row with stable keys; add a delete checkbox (processed on submit)
+        # Render each row
         for i, r in enumerate(rows):
-            col1, col2, col3, col4, col5, col6, col7, col8 = st.columns([2.2,1.3,0.9,1.0,1.1,1.3,2.0,0.6])
-            with col1:
-                st.text_input("",
-                    value=r["product_name"], key=f"{session_key}_name_{i}", placeholder="e.g., Renite")
-            with col2:
-                st.text_input("",
-                    value=r["size"], key=f"{session_key}_size_{i}", placeholder="e.g., 600x600")
-            with col3:
-                st.text_input("",
-                    value=r["qty"], key=f"{session_key}_qty_{i}", placeholder="")
-            with col4:
-                st.text_input("",
-                    value=r["rate"], key=f"{session_key}_rate_{i}", placeholder="")
-            with col5:
-                st.text_input("",
-                    value=r["unit"], key=f"{session_key}_unit_{i}", placeholder="pcs/boxes/sq_ft/bags/kgs")
-            with col6:
-                st.text_input("",
-                    value=r["material"], key=f"{session_key}_mat_{i}", placeholder="Tiles/Granites/Marble/…")
-            with col7:
-                st.text_input("",
-                    value=r["comments"], key=f"{session_key}_cmt_{i}", placeholder="")
-            with col8:
+            col = st.columns([2.0,1.3,0.9,1.0,1.0,1.3,2.0,1.0,0.5])
+            with col[0]:
+                st.text_input("", value=r["product_name"], key=f"{session_key}_name_{i}", placeholder="e.g., Renite")
+            with col[1]:
+                st.text_input("", value=r["size"], key=f"{session_key}_size_{i}", placeholder="e.g., 600x600")
+            with col[2]:
+                st.text_input("", value=r["qty"], key=f"{session_key}_qty_{i}", placeholder="")  # keeps blank if empty
+            with col[3]:
+                st.text_input("", value=r["rate"], key=f"{session_key}_rate_{i}", placeholder="")
+            with col[4]:
+                st.text_input("", value=r["unit"], key=f"{session_key}_unit_{i}", placeholder="pcs/boxes/sq_ft/bags/kgs")
+            with col[5]:
+                st.text_input("", value=r["material"], key=f"{session_key}_mat_{i}", placeholder="Tiles/Granites/Marble/…")
+            with col[6]:
+                st.text_input("", value=r["comments"], key=f"{session_key}_cmt_{i}", placeholder="")
+            with col[7]:
+                amt = _row_amount(r.get("qty",""), r.get("rate",""))
+                st.markdown(f"<div style='padding-top:6px;font-weight:600'>₹ {amt:,.2f}</div>", unsafe_allow_html=True)
+            with col[8]:
                 st.checkbox("", value=False, key=f"{session_key}_del_{i}")
 
         submitted = st.form_submit_button("Update Items")
 
-        # On submit: copy widget values back into our row list (and handle deletions)
         if submitted:
-            new_rows = []
-            subtotal = 0.0
+            new_rows, subtotal = [], 0.0
             for i, _r in enumerate(rows):
                 name = st.session_state.get(f"{session_key}_name_{i}", "")
                 size = st.session_state.get(f"{session_key}_size_{i}", "")
@@ -273,7 +283,6 @@ def row_form(session_key: str, title: str):
 
                 subtotal += _to_float(qty) * _to_float(rate)
 
-            # Persist new rows back to session
             st.session_state[session_key] = new_rows if new_rows else [
                 {"product_name":"","size":"","qty":"","rate":"","unit":"","material":"","comments":""}
                 for _ in range(6)
@@ -281,7 +290,6 @@ def row_form(session_key: str, title: str):
             st.session_state[subtotal_key] = subtotal
             st.experimental_rerun()
 
-    # Show last computed subtotal (updates after you click 'Update Items')
     st.markdown(f"**Subtotal:** ₹ {st.session_state[subtotal_key]:,.2f}")
     return st.session_state[session_key], st.session_state[subtotal_key]
 
@@ -295,6 +303,7 @@ button, .stButton button { padding: 0.6rem 1rem !important; font-size: 18px !imp
 label { font-size: 18px !important; }
 .negative { color: #b00020; font-weight: 700; }
 .amount { font-weight: 700; }
+[data-testid="stForm"] { padding: 0.75rem 1rem; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -405,7 +414,6 @@ with tabs[1]:
     rows_in, subtotal_in = row_form("rows_purchase", "Items")
     if st.button("Save Purchase Bill", key="save_purchase_bill"):
         try:
-            # decide defaults only now
             def first_non_blank(items, key, fallback):
                 for r in items:
                     val = (r.get(key) or "").strip()
@@ -617,4 +625,4 @@ with tabs[4]:
         st.info("No entries on this day yet.")
 
 st.divider()
-st.caption("Quick Bill now uses a form (not data_editor), so inputs won’t refresh while typing. Click **Update Items** to apply changes.")
+st.caption("Quick Bill uses a form that won’t refresh while typing. Click **Update Items** to apply changes. Per-row Amount and a grand Subtotal are shown for clarity.")
