@@ -7,11 +7,11 @@ import hashlib, secrets
 
 DB_PATH = "inventory.db"
 
-# ======= SINGLE-USER CONFIG =======
-ALLOWED_USERS = {"Venkat Reddy"}          # <- only these usernames can login
-DEFAULT_USERNAME = "Reddy"         # <- created automatically if missing
-DEFAULT_PASSWORD = "1234"            # <- change this before giving it to him
-# ==================================
+# ======= SINGLE-USER CONFIG (must be lowercase) =======
+ALLOWED_USERS = {"venkat reddy"}     # only these usernames can login
+DEFAULT_USERNAME = "venkat reddy"    # must be in ALLOWED_USERS
+DEFAULT_PASSWORD = "1234"            # change after first login
+# ======================================================
 
 # ---------- AUTH ----------
 def _hash_password(password: str, salt: str) -> str:
@@ -81,6 +81,14 @@ def init_db():
             notes TEXT,
             FOREIGN KEY(product_id) REFERENCES products(id),
             FOREIGN KEY(customer_id) REFERENCES customers(id)
+        )""")
+        # Users table for login
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS users(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            salt TEXT NOT NULL
         )""")
         conn.commit()
 
@@ -164,9 +172,53 @@ label { font-size: 18px !important; }
 </style>
 """, unsafe_allow_html=True)
 
+# Init DB and ensure default user exists
 init_db()
+if DEFAULT_USERNAME in ALLOWED_USERS and not user_exists(DEFAULT_USERNAME):
+    try:
+        create_user(DEFAULT_USERNAME, DEFAULT_PASSWORD)
+    except Exception:
+        pass
 
 st.title("Tiles & Granite Inventory")
+
+# ---- LOGIN WALL ----
+if "user" not in st.session_state:
+    with st.expander("🔐 Login", expanded=True):
+        u = st.text_input("Username")
+        p = st.text_input("Password", type="password")
+        if st.button("Login"):
+            user = verify_login(u, p)
+            if user:
+                st.session_state.user = user
+                st.rerun()
+            else:
+                st.error("Invalid credentials.")
+    st.stop()  # do not show the rest of the app until logged in
+
+# Logged in – header + logout + change password
+st.success(f"Logged in as **{st.session_state.user['username']}**")
+colL, colR = st.columns([1,5])
+if colL.button("Logout"):
+    st.session_state.pop("user", None)
+    st.rerun()
+
+with colR.expander("Change my password"):
+    old = st.text_input("Old password", type="password", key="oldpw")
+    new1 = st.text_input("New password", type="password", key="newpw1")
+    new2 = st.text_input("Confirm new password", type="password", key="newpw2")
+    if st.button("Update password"):
+        if not old or not new1 or not new2:
+            st.error("Fill all fields.")
+        elif new1 != new2:
+            st.error("New passwords do not match.")
+        else:
+            who = verify_login(st.session_state.user["username"], old)
+            if not who:
+                st.error("Old password is incorrect.")
+            else:
+                change_password(st.session_state.user["username"], new1)
+                st.success("Password updated.")
 
 tabs = st.tabs([
     "➕ Add Products",
@@ -195,7 +247,8 @@ with tabs[0]:
             ["pcs", "box", "sq_ft", "sq_m", "bags", "kgs"],
             index=0
         )
-        opening = st.number_input("Opening Stock", min_value=0.0, step=1.0, value=0.0, help="Initial quantity you already have.")
+        opening = st.number_input("Opening Stock", min_value=0.0, step=1.0, value=0.0,
+                                  help="Initial quantity you already have.")
     if st.button("Add Product"):
         if not name.strip():
             st.error("Product Name is required.")
@@ -208,7 +261,8 @@ with tabs[0]:
     if prods:
         df = pd.DataFrame(prods)
         df["current_stock"] = df["id"].apply(product_stock)
-        st.dataframe(df[["id","name","material","size","unit","opening_stock","current_stock"]], use_container_width=True)
+        st.dataframe(df[["id","name","material","size","unit","opening_stock","current_stock"]],
+                     use_container_width=True)
     else:
         st.info("No products yet.")
 
@@ -290,7 +344,7 @@ with tabs[3]:
                 st.caption("Tip: add customers in the Customers tab.")
         notes = st.text_input("Notes", placeholder="Invoice no / payment mode / remarks")
 
-        # ALLOW NEGATIVE STOCK: remove the check that blocked sales > stock_now
+        # ALLOW NEGATIVE STOCK
         if st.button("Save Sale"):
             if qty <= 0:
                 st.error("Quantity must be > 0.")
@@ -344,7 +398,7 @@ with tabs[5]:
         rep["time"] = pd.to_datetime(rep["ts"]).dt.strftime("%H:%M")
         rep["qty_display"] = rep.apply(lambda r: f'{abs(r["qty"])} {r["unit"]}', axis=1)
         rep["value"] = rep.apply(lambda r: (abs(r["qty"]) * (r["price_per_unit"] or 0.0)), axis=1)
-        rep["neg_stock_note"] = ""  # placeholder for optional future per-line note
+        rep["neg_stock_note"] = ""  # placeholder
 
         st.markdown("#### All Movements Today")
         show = rep[["time","kind","product_name","qty_display","customer_name","price_per_unit","value","notes"]]
