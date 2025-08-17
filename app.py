@@ -6,11 +6,13 @@ import hashlib, secrets
 
 import pandas as pd
 import streamlit as st
-
-DB_PATH = "inventory.db"
-
+import os
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH = os.path.join(DATA_DIR, "inventory.db")
 # ======= SINGLE-USER CONFIG (must be lowercase) =======
-ALLOWED_USERS = {"venkat reddy"}      # only these usernames can login
+ALLOWED_USERS = {"venkat reddy"}      # only these usernaes can login
 DEFAULT_USERNAME = "venkat reddy"     # must be in ALLOWED_USERS
 DEFAULT_PASSWORD = "1234"             # change after first login
 # ======================================================
