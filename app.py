@@ -4,8 +4,12 @@ from datetime import date, datetime
 import pandas as pd
 import streamlit as st
 import hashlib, secrets
+import os
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH = os.path.join(DATA_DIR, "inventory.db")
 
-DB_PATH = "inventory.db"
 
 # ======= SINGLE-USER CONFIG (must be lowercase) =======
 ALLOWED_USERS = {"venkat reddy"}      # only these usernames can login
