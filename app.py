@@ -8,9 +8,9 @@ import hashlib, secrets
 DB_PATH = "inventory.db"
 
 # ======= SINGLE-USER CONFIG (must be lowercase) =======
-ALLOWED_USERS = {"venkat reddy"}     # only these usernames can login
-DEFAULT_USERNAME = "venkat reddy"    # must be in ALLOWED_USERS
-DEFAULT_PASSWORD = "1234"            # change after first login
+ALLOWED_USERS = {"venkat reddy"}      # only these usernames can login
+DEFAULT_USERNAME = "venkat reddy"     # must be in ALLOWED_USERS
+DEFAULT_PASSWORD = "1234"             # change after first login
 # ======================================================
 
 # ---------- AUTH ----------
@@ -181,44 +181,40 @@ def _to_float(txt: str) -> float:
     except:
         return 0.0
 
-# ---------- ROW FORM (improved & dropdowns, no delete) ----------
+# ---------- ROW FORM (Material, Product, Size, Unit, Qty, Rate, Amount; Remove Comments) ----------
+DEFAULT_UNIT_OPTIONS = ["pcs", "box", "sq_ft", "bag", "kg"]
+DEFAULT_MATERIAL_OPTIONS = ["Tiles", "Granite", "Marble", "Other"]
+
 def ensure_rows(session_key: str, start_rows: int = 6):
     if session_key not in st.session_state:
         st.session_state[session_key] = [
-            {"product_name":"","size":"","qty":"","rate":"","unit":"","material":"","comments":""}
+            {"material":"", "product_name":"","size":"","unit":"","qty":"","rate":""}
             for _ in range(start_rows)
         ]
 
 def _row_amount(qty_txt: str, rate_txt: str) -> float:
     return _to_float(qty_txt) * _to_float(rate_txt)
 
-# default choices for Unit and Material
-DEFAULT_UNIT_OPTIONS = ["pcs", "box", "sq_ft", "bag", "kg"]
-DEFAULT_MATERIAL_OPTIONS = ["Tiles", "Granite", "Marble", "Other"]
-
 def row_form(session_key: str, title: str):
     """
     Row editor:
-    - inputs are wrapped in a form so typing doesn't rerun
-    - Unit & Material are selectboxes (still allow existing custom values)
-    - no per-row delete (simpler)
-    - amounts/subtotal are recalculated on submit and shown
+    Arrange columns as: Material, Product, Size, Unit, Qty, Rate, Amount.
+    Removes comments field.
     """
     ensure_rows(session_key)
     rows = st.session_state[session_key]
 
     st.markdown(f"#### {title}")
 
-    # top-level controls (don't force rerun while typing)
     c1, c2, c3 = st.columns([1,1,6])
     with c1:
         if st.button("➕ Add row", key=f"add_{session_key}"):
-            rows.append({"product_name":"","size":"","qty":"","rate":"","unit":"","material":"","comments":""})
+            rows.append({"material":"", "product_name":"","size":"","unit":"","qty":"","rate":""})
             st.rerun()
     with c2:
         if st.button("🧹 Clear", key=f"clear_{session_key}"):
             st.session_state[session_key] = [
-                {"product_name":"","size":"","qty":"","rate":"","unit":"","material":"","comments":""}
+                {"material":"", "product_name":"","size":"","unit":"","qty":"","rate":""}
                 for _ in range(6)
             ]
             st.rerun()
@@ -228,74 +224,72 @@ def row_form(session_key: str, title: str):
     if subtotal_key not in st.session_state:
         st.session_state[subtotal_key] = 0.0
 
-    # form to avoid reruns while typing
+    # columns: Material, Product Name, Size, Unit, Qty, Rate, Amount
     with st.form(f"form_{session_key}", clear_on_submit=False):
-        # labels row
-        lab = st.columns([2.0,1.3,0.9,1.0,1.0,1.3,2.0,1.0])
-        lab[0].markdown("**Product Name**")
-        lab[1].markdown("**Size (req)**")
-        lab[2].markdown("**Qty**")
-        lab[3].markdown("**Rate**")
-        lab[4].markdown("**Unit**")
-        lab[5].markdown("**Material**")
-        lab[6].markdown("**Comments**")
-        lab[7].markdown("**Amount**")
+        lab = st.columns([1.3,2.0,1.3,1.0,0.9,1.0,1.0])
+        lab[0].markdown("**Material**")
+        lab[1].markdown("**Product Name**")
+        lab[2].markdown("**Size (req)**")
+        lab[3].markdown("**Unit**")
+        lab[4].markdown("**Qty**")
+        lab[5].markdown("**Rate**")
+        lab[6].markdown("**Amount**")
 
-        # per-row widgets
         for i, r in enumerate(rows):
-            cols = st.columns([2.0,1.3,0.9,1.0,1.0,1.3,2.0,1.0])
-            # product
-            with cols[0]:
-                st.text_input("", value=r.get("product_name",""), key=f"{session_key}_name_{i}", placeholder="e.g., Renite")
-            # size
-            with cols[1]:
-                st.text_input("", value=r.get("size",""), key=f"{session_key}_size_{i}", placeholder="e.g., 600x600")
-            # qty
-            with cols[2]:
-                st.text_input("", value=r.get("qty",""), key=f"{session_key}_qty_{i}", placeholder="")
-            # rate
-            with cols[3]:
-                st.text_input("", value=r.get("rate",""), key=f"{session_key}_rate_{i}", placeholder="")
-            # unit: show a selectbox with default options but keep current value selectable
-            unit_current = (r.get("unit") or "").strip()
-            unit_options = DEFAULT_UNIT_OPTIONS.copy()
-            if unit_current and unit_current not in unit_options:
-                unit_options = [unit_current] + unit_options
-            with cols[4]:
-                st.selectbox("", options=unit_options, index=unit_options.index(unit_current) if unit_current in unit_options else 0,
-                             key=f"{session_key}_unit_{i}")
-            # material: same approach
+            cols = st.columns([1.3,2.0,1.3,1.0,0.9,1.0,1.0])
+
+            # Material
             mat_current = (r.get("material") or "").strip()
             mat_options = DEFAULT_MATERIAL_OPTIONS.copy()
             if mat_current and mat_current not in mat_options:
                 mat_options = [mat_current] + mat_options
-            with cols[5]:
+            with cols[0]:
                 st.selectbox("", options=mat_options, index=mat_options.index(mat_current) if mat_current in mat_options else 0,
                              key=f"{session_key}_mat_{i}")
-            # comments
-            with cols[6]:
-                st.text_input("", value=r.get("comments",""), key=f"{session_key}_cmt_{i}", placeholder="")
-            # computed amount (uses widget-stored values if present)
+
+            # Product Name
+            with cols[1]:
+                st.text_input("", value=r.get("product_name",""), key=f"{session_key}_name_{i}", placeholder="e.g., Renite")
+
+            # Size
+            with cols[2]:
+                st.text_input("", value=r.get("size",""), key=f"{session_key}_size_{i}", placeholder="e.g., 600x600")
+
+            # Unit
+            unit_current = (r.get("unit") or "").strip()
+            unit_options = DEFAULT_UNIT_OPTIONS.copy()
+            if unit_current and unit_current not in unit_options:
+                unit_options = [unit_current] + unit_options
+            with cols[3]:
+                st.selectbox("", options=unit_options, index=unit_options.index(unit_current) if unit_current in unit_options else 0,
+                             key=f"{session_key}_unit_{i}")
+
+            # Qty
+            with cols[4]:
+                st.text_input("", value=r.get("qty",""), key=f"{session_key}_qty_{i}", placeholder="")
+
+            # Rate
+            with cols[5]:
+                st.text_input("", value=r.get("rate",""), key=f"{session_key}_rate_{i}", placeholder="")
+
+            # Amount
             qty_widget_val = st.session_state.get(f"{session_key}_qty_{i}", r.get("qty",""))
             rate_widget_val = st.session_state.get(f"{session_key}_rate_{i}", r.get("rate",""))
             amt = _row_amount(qty_widget_val, rate_widget_val)
-            with cols[7]:
+            with cols[6]:
                 st.markdown(f"<div style='padding-top:6px;font-weight:600'>₹ {amt:,.2f}</div>", unsafe_allow_html=True)
 
         submitted = st.form_submit_button("Update Items")
-
         if submitted:
             new_rows = []
             subtotal = 0.0
-            # read back widget values and overwrite session rows
             for i, _r in enumerate(rows):
-                name = st.session_state.get(f"{session_key}_name_{i}", "").strip()
-                size = st.session_state.get(f"{session_key}_size_{i}", "").strip()
-                qty  = st.session_state.get(f"{session_key}_qty_{i}", "").strip()
-                rate = st.session_state.get(f"{session_key}_rate_{i}", "").strip()
-                unit = st.session_state.get(f"{session_key}_unit_{i}", "").strip()
-                mat  = st.session_state.get(f"{session_key}_mat_{i}", "").strip()
-                cmt  = st.session_state.get(f"{session_key}_cmt_{i}", "").strip()
+                name  = st.session_state.get(f"{session_key}_name_{i}", "").strip()
+                size  = st.session_state.get(f"{session_key}_size_{i}", "").strip()
+                qty   = st.session_state.get(f"{session_key}_qty_{i}", "").strip()
+                rate  = st.session_state.get(f"{session_key}_rate_{i}", "").strip()
+                unit  = st.session_state.get(f"{session_key}_unit_{i}", "").strip()
+                mat   = st.session_state.get(f"{session_key}_mat_{i}", "").strip()
 
                 new_rows.append({
                     "product_name": name,
@@ -303,23 +297,18 @@ def row_form(session_key: str, title: str):
                     "qty": qty,
                     "rate": rate,
                     "unit": unit,
-                    "material": mat,
-                    "comments": cmt
+                    "material": mat
                 })
 
                 subtotal += _to_float(qty) * _to_float(rate)
 
-            # persist
             st.session_state[session_key] = new_rows if new_rows else [
-                {"product_name":"","size":"","qty":"","rate":"","unit":"","material":"","comments":""}
+                {"material":"", "product_name":"","size":"","unit":"","qty":"","rate":""}
                 for _ in range(6)
             ]
             st.session_state[subtotal_key] = subtotal
-
-            # rerun to show updated amounts/subtotal in the UI
             st.experimental_rerun()
 
-    # show last computed subtotal (updated after you click Update Items)
     st.markdown(f"**Subtotal:** ₹ {st.session_state[subtotal_key]:,.2f}")
     return st.session_state[session_key], st.session_state[subtotal_key]
 
@@ -466,11 +455,10 @@ with tabs[1]:
                 rate = _to_float(ln.get("rate"))
                 unit = (ln.get("unit") or unit_default).strip()
                 material = (ln.get("material") or mat_default).strip()
-                comments = (ln.get("comments") or "").strip()
                 if qty <= 0:
                     continue
                 pid = ensure_product(name, size=size, unit=unit, material=material)
-                note = " | ".join([s for s in [f"Bill {bill_no_in}" if bill_no_in else None, comments or None] if s])
+                note = f"Bill {bill_no_in}" if bill_no_in else None
                 add_move("purchase", pid, qty, price_per_unit=(rate or None),
                          customer_id=supplier_id, notes=(note or None))
                 saved += 1
@@ -478,7 +466,7 @@ with tabs[1]:
             if saved:
                 st.success(f"Saved {saved} purchase line(s).")
                 st.session_state["rows_purchase"] = [
-                    {"product_name":"","size":"","qty":"","rate":"","unit":"","material":"","comments":""}
+                    {"material":"", "product_name":"","size":"","unit":"","qty":"","rate":""}
                     for _ in range(6)
                 ]
                 for k in ["bill_no_in","supplier_in"]:
@@ -561,11 +549,10 @@ with tabs[2]:
                 rate = _to_float(ln.get("rate"))
                 unit = (ln.get("unit") or unit_default).strip()
                 material = (ln.get("material") or mat_default).strip()
-                comments = (ln.get("comments") or "").strip()
                 if qty <= 0:
                     continue
                 pid = ensure_product(name, size=size, unit=unit, material=material)
-                note = " | ".join([s for s in [f"Bill {bill_no_out}" if bill_no_out else None, comments or None] if s])
+                note = f"Bill {bill_no_out}" if bill_no_out else None
                 add_move("sale", pid, qty, price_per_unit=(rate or None),
                          customer_id=cust_id, notes=(note or None))
                 saved += 1
@@ -573,7 +560,7 @@ with tabs[2]:
             if saved:
                 st.success(f"Saved {saved} sale line(s).")
                 st.session_state["rows_sale"] = [
-                    {"product_name":"","size":"","qty":"","rate":"","unit":"","material":"","comments":""}
+                    {"material":"", "product_name":"","size":"","unit":"","qty":"","rate":""}
                     for _ in range(6)
                 ]
                 for k in ["bill_no_out","customer_out"]:
@@ -649,7 +636,7 @@ with tabs[4]:
             })
         st.dataframe(pd.DataFrame(snap).sort_values("Product"), use_container_width=True)
 
-        if st.button("Export Today’s Report to CSV"):
+        if st.button(f"Export Today’s Report to CSV"):
             show.to_csv(f"report_{day.isoformat()}.csv", index=False)
             st.success(f"Saved as report_{day.isoformat()}.csv")
     else:
