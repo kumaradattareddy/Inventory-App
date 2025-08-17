@@ -181,7 +181,7 @@ def _to_float(txt: str) -> float:
     except:
         return 0.0
 
-# ---------- ROW FORM (Material, Product Name, Size, Unit, Qty, Rate, Amount; No Comments) ----------
+# ---------- ROW FORM (Material, Size, Product Name, Unit, Qty, Rate, Amount; No Comments) ----------
 DEFAULT_UNIT_OPTIONS = ["pcs", "box", "sq_ft", "bag", "kg"]
 DEFAULT_MATERIAL_OPTIONS = ["Tiles", "Granite", "Marble", "Other"]
 
@@ -199,7 +199,7 @@ def _row_amount(qty_txt: str, rate_txt: str) -> float:
 
 def row_form(session_key: str, title: str):
     """
-    Arranges fields as: Material, Product Name, Size, Unit, Qty, Rate, Amount.
+    Arranges fields as: Material, Size, Product Name, Unit, Qty, Rate, Amount.
     Comments field removed.
     """
     ensure_rows(session_key)
@@ -224,19 +224,19 @@ def row_form(session_key: str, title: str):
     if subtotal_key not in st.session_state:
         st.session_state[subtotal_key] = 0.0
 
-    # Columns: Material, Product Name, Size, Unit, Qty, Rate, Amount
+    # Columns: Material, Size, Product Name, Unit, Qty, Rate, Amount
     with st.form(f"form_{session_key}", clear_on_submit=False):
-        labs = st.columns([1.1, 2, 1.1, 0.9, 0.8, 0.9, 1.1])
+        labs = st.columns([1.1, 1.1, 2, 0.9, 0.8, 0.9, 1.1])
         labs[0].markdown("**Material**")
-        labs[1].markdown("**Product Name**")
-        labs[2].markdown("**Size (req)**")
+        labs[1].markdown("**Size (req)**")
+        labs[2].markdown("**Product Name**")
         labs[3].markdown("**Unit**")
         labs[4].markdown("**Qty**")
         labs[5].markdown("**Rate**")
         labs[6].markdown("**Amount**")
 
         for i, r in enumerate(rows):
-            cols = st.columns([1.1, 2, 1.1, 0.9, 0.8, 0.9, 1.1])
+            cols = st.columns([1.1, 1.1, 2, 0.9, 0.8, 0.9, 1.1])
 
             # 1. Material (selectbox, keep custom if present)
             mat_current = (r.get("material") or "").strip()
@@ -248,13 +248,13 @@ def row_form(session_key: str, title: str):
                              index=mat_options.index(mat_current) if mat_current in mat_options else 0,
                              key=f"{session_key}_mat_{i}")
 
-            # 2. Product Name
+            # 2. Size
             with cols[1]:
-                st.text_input("", value=r.get("product_name",""), key=f"{session_key}_name_{i}", placeholder="e.g., Renite")
-
-            # 3. Size
-            with cols[2]:
                 st.text_input("", value=r.get("size",""), key=f"{session_key}_size_{i}", placeholder="e.g., 600x600")
+
+            # 3. Product Name
+            with cols[2]:
+                st.text_input("", value=r.get("product_name",""), key=f"{session_key}_name_{i}", placeholder="e.g., Renite")
 
             # 4. Unit (selectbox, keep custom if present)
             unit_current = (r.get("unit") or "").strip()
@@ -287,8 +287,8 @@ def row_form(session_key: str, title: str):
             new_rows = []
             for i, _ in enumerate(rows):
                 mat   = st.session_state.get(f"{session_key}_mat_{i}", "").strip()
-                name  = st.session_state.get(f"{session_key}_name_{i}", "").strip()
                 size  = st.session_state.get(f"{session_key}_size_{i}", "").strip()
+                name  = st.session_state.get(f"{session_key}_name_{i}", "").strip()
                 unit  = st.session_state.get(f"{session_key}_unit_{i}", "").strip()
                 qty   = st.session_state.get(f"{session_key}_qty_{i}", "").strip()
                 rate  = st.session_state.get(f"{session_key}_rate_{i}", "").strip()
@@ -305,7 +305,7 @@ def row_form(session_key: str, title: str):
                 {"material":"","product_name":"","size":"","unit":"","qty":"","rate":""} for _ in range(6)
             ]
             st.session_state[subtotal_key] = subtotal
-            st.experimental_rerun()
+            st.rerun()
 
     st.markdown(f"**Subtotal:** ₹ {st.session_state[subtotal_key]:,.2f}")
     return st.session_state[session_key], st.session_state[subtotal_key]
