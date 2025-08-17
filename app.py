@@ -33,7 +33,6 @@ def create_user(username: str, password: str):
 
 def verify_login(username: str, password: str):
     username = username.strip().lower()
-    # enforce allowlist first
     if username not in ALLOWED_USERS:
         return None
     row = run_query("SELECT username, password_hash, salt FROM users WHERE username=?", (username,), fetch=True)
@@ -43,11 +42,6 @@ def verify_login(username: str, password: str):
     if _hash_password(password, row["salt"]) == row["password_hash"]:
         return {"username": row["username"]}
     return None
-
-def change_password(username: str, new_password: str):
-    salt = secrets.token_hex(16)
-    pwd_hash = _hash_password(new_password, salt)
-    run_query("UPDATE users SET password_hash=?, salt=? WHERE username=?", (pwd_hash, salt, username.strip().lower()))
 
 # ---------- DB SETUP ----------
 def init_db():
@@ -59,7 +53,7 @@ def init_db():
             name TEXT NOT NULL,
             material TEXT,                 -- Tiles / Granites / Marble / Sanitary / CP / MYK / Other
             size TEXT,                     -- e.g., 2x2 ft, 600x600 mm
-            unit TEXT NOT NULL,            -- pcs / box / sq_ft / sq_m / bags / kgs
+            unit TEXT NOT NULL,            -- pcs / boxs / sq_ft / bags / kgs
             opening_stock REAL DEFAULT 0
         )""")
         c.execute("""
@@ -82,7 +76,6 @@ def init_db():
             FOREIGN KEY(product_id) REFERENCES products(id),
             FOREIGN KEY(customer_id) REFERENCES customers(id)
         )""")
-        # Users table for login
         c.execute("""
         CREATE TABLE IF NOT EXISTS users(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,7 +104,6 @@ def list_customers():
     return [dict(r) for r in rows]
 
 def product_stock(product_id):
-    # opening + sum(moves)
     row = run_query("SELECT opening_stock FROM products WHERE id=?", (product_id,), fetch=True)
     if not row:
         return 0.0
@@ -133,7 +125,6 @@ def add_customer(name, phone, address):
 
 def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, notes=None, when=None):
     ts = (when or datetime.now()).isoformat(timespec="seconds")
-    # For sales, qty should be negative (stock goes down)
     if kind == "sale" and qty > 0:
         qty = -qty
     run_query(
@@ -154,21 +145,26 @@ def moves_on_day(d: date):
     """, (start, end), fetch=True)
     return [dict(r) for r in rows]
 
+# --- Utility: parse numeric text (blank or invalid -> 0) ---
+def _to_float(txt: str) -> float:
+    s = (txt or "").strip()
+    if not s:
+        return 0.0
+    try:
+        return float(s)
+    except:
+        return 0.0
+
 # ---------- UI ----------
 st.set_page_config(page_title="Tiles & Granite Inventory", layout="wide")
 
-# Make fonts/buttons a bit larger for seniors
 st.markdown("""
 <style>
-html, body, [class*="css"]  {
-  font-size: 18px !important;
-}
-button, .stButton button {
-  padding: 0.8rem 1.2rem !important;
-  font-size: 18px !important;
-}
+html, body, [class*="css"]  { font-size: 18px !important; }
+button, .stButton button { padding: 0.8rem 1.2rem !important; font-size: 18px !important; }
 label { font-size: 18px !important; }
 .negative { color: #b00020; font-weight: 700; }
+.amount { font-weight: 700; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -194,10 +190,9 @@ if "user" not in st.session_state:
                 st.rerun()
             else:
                 st.error("Invalid credentials.")
-    st.stop()  # do not show the rest of the app until logged in
+    st.stop()
 
-# Logged in – header + logout + change password
-# Logged in – header + logout (top-right)
+# Logged in – top-right logout
 top_left, top_right = st.columns([6, 1])
 with top_left:
     st.success(f"Logged in as **{st.session_state.user['username']}**")
@@ -205,7 +200,6 @@ with top_right:
     if st.button("Logout"):
         st.session_state.pop("user", None)
         st.rerun()
-
 
 tabs = st.tabs([
     "➕ Add Products",
@@ -216,32 +210,34 @@ tabs = st.tabs([
     "🗓️ Daily Report"
 ])
 
-# --- Add Products ---
+# ===================== Add Products =====================
 with tabs[0]:
     st.subheader("Add a New Product")
-    colA, colB = st.columns(2)
-    with colA:
-        name = st.text_input("Product Name*", placeholder="e.g., Kajaria 2x2 Polished")
-        material = st.selectbox(
-            "Material",
-            ["Tiles", "Granites", "Marble", "Sanitary", "CP", "MYK", "Other"],
-            index=0
-        )
-        size = st.text_input("Size", placeholder="e.g., 2x2 ft / 600x600 mm")
-    with colB:
-        unit = st.selectbox(
-            "Unit*",
-            ["pcs", "boxs", "sq_ft", "bags", "kgs"],
-            index=0
-        )
-        opening = st.number_input("Opening Stock", min_value=0.0, step=1.0, value=0.0,
-                                  help="Initial quantity you already have.")
+
+    # Keep values in session so we can clear after save
+    name = st.text_input("Product Name*", key="add_name", placeholder="e.g., Kajaria 2x2 Polished")
+    material = st.selectbox("Material",
+                            ["Tiles", "Granites", "Marble", "Sanitary", "CP", "MYK", "Other"],
+                            index=0, key="add_material")
+    size = st.text_input("Size", key="add_size", placeholder="e.g., 2x2 ft / 600x600 mm")
+    unit = st.selectbox("Unit*", ["pcs", "boxs", "sq_ft", "bags", "kgs"], index=0, key="add_unit")
+    opening_text = st.text_input("Opening Stock", key="add_opening", placeholder="")
+
     if st.button("Add Product"):
-        if not name.strip():
+        if not (name or "").strip():
             st.error("Product Name is required.")
         else:
+            opening = _to_float(opening_text)
             add_product(name, material, size, unit, opening)
             st.success("Product added.")
+            # Clear fields after adding
+            for k in ["add_name", "add_size", "add_opening"]:
+                st.session_state[k] = ""
+            # optional reset of dropdowns
+            st.session_state["add_material"] = "Tiles"
+            st.session_state["add_unit"] = "pcs"
+            st.rerun()
+
     st.divider()
     st.subheader("All Products")
     prods = list_products()
@@ -253,21 +249,21 @@ with tabs[0]:
     else:
         st.info("No products yet.")
 
-# --- Customers ---
+# ===================== Customers =====================
 with tabs[1]:
     st.subheader("Add Customer")
-    col1, col2 = st.columns(2)
-    with col1:
-        cname = st.text_input("Customer Name*", placeholder="e.g., Suresh Constructions")
-        cphone = st.text_input("Phone", placeholder="e.g., 9876543210")
-    with col2:
-        caddr = st.text_area("Address", placeholder="Area / City / Notes")
+    cname = st.text_input("Customer Name*", key="cust_name", placeholder="e.g., Suresh Constructions")
+    cphone = st.text_input("Phone", key="cust_phone", placeholder="e.g., 9876543210")
+    caddr = st.text_area("Address", key="cust_addr", placeholder="Area / City / Notes")
     if st.button("Add Customer"):
-        if not cname.strip():
+        if not (cname or "").strip():
             st.error("Customer Name is required.")
         else:
             add_customer(cname, cphone, caddr)
             st.success("Customer added.")
+            for k in ["cust_name","cust_phone","cust_addr"]:
+                st.session_state[k] = ""
+            st.rerun()
     st.divider()
     st.subheader("All Customers")
     custs = list_customers()
@@ -276,7 +272,7 @@ with tabs[1]:
     else:
         st.info("No customers yet.")
 
-# --- Purchase (IN) ---
+# ===================== Purchase (IN) =====================
 with tabs[2]:
     st.subheader("Record Purchase (Stock In)")
     prods = list_products()
@@ -286,22 +282,30 @@ with tabs[2]:
         prod_map = {f'{p["name"]} ({p["size"] or ""} | {p["unit"]})': p for p in prods}
         choice = st.selectbox("Product*", list(prod_map.keys()), key="purchase_product")
         p = prod_map[choice]
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            qty = st.number_input(f"Quantity ({p['unit']})*", min_value=0.0, step=1.0, value=0.0)
-        with col2:
-            price = st.number_input("Price per unit (optional)", min_value=0.0, step=1.0, value=0.0)
-        with col3:
-            notes = st.text_input("Notes", placeholder="Bill no / supplier / remarks")
+
+        qty_text = st.text_input(f"Quantity ({p['unit']})*", key="purchase_qty", placeholder="")
+        price_text = st.text_input("Price per unit (optional)", key="purchase_price", placeholder="")
+        notes = st.text_input("Notes", key="purchase_notes", placeholder="Bill no / supplier / remarks")
+
+        # Live amount preview
+        amount = _to_float(qty_text) * _to_float(price_text)
+        st.markdown(f"**Amount:** ₹ {amount:,.2f}")
+
         if st.button("Save Purchase"):
+            qty = _to_float(qty_text)
+            price = _to_float(price_text)
             if qty <= 0:
                 st.error("Quantity must be > 0.")
             else:
                 add_move("purchase", p["id"], qty, price_per_unit=(price or None), notes=notes or None)
                 st.success("Purchase saved.")
+                for k in ["purchase_qty","purchase_price","purchase_notes"]:
+                    st.session_state[k] = ""
+                st.rerun()
+
         st.caption(f"Current stock: **{product_stock(p['id'])} {p['unit']}**")
 
-# --- Sale (OUT) ---
+# ===================== Sale (OUT) – Revamped =====================
 with tabs[3]:
     st.subheader("Record Sale (Stock Out)")
     prods = list_products()
@@ -313,47 +317,146 @@ with tabs[3]:
         choice = st.selectbox("Product*", list(prod_map.keys()), key="sale_product")
         p = prod_map[choice]
         stock_now = product_stock(p["id"])
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            qty = st.number_input(f"Quantity to sell ({p['unit']})*", min_value=0.0, step=1.0, value=0.0)
-        with col2:
-            price = st.number_input("Selling price per unit (optional)", min_value=0.0, step=1.0, value=0.0)
-        with col3:
-            customer_name = None
-            customer_id = None
-            if custs:
-                cust_map = {c["name"]: c for c in custs}
-                sel = st.selectbox("Customer (optional)", ["-- none --"] + list(cust_map.keys()))
-                if sel != "-- none --":
-                    customer_id = cust_map[sel]["id"]
-                    customer_name = sel
-            else:
-                st.caption("Tip: add customers in the Customers tab.")
-        notes = st.text_input("Notes", placeholder="Invoice no / payment mode / remarks")
 
-        # ALLOW NEGATIVE STOCK
+        qty_text = st.text_input(f"Quantity to sell ({p['unit']})*", key="sale_qty", placeholder="")
+        price_text = st.text_input("Selling price per unit (optional)", key="sale_price", placeholder="")
+
+        customer_id = None
+        if custs:
+            cust_map = {c["name"]: c for c in custs}
+            sel = st.selectbox("Customer (optional)", ["-- none --"] + list(cust_map.keys()), key="sale_customer")
+            if sel != "-- none --":
+                customer_id = cust_map[sel]["id"]
+        else:
+            st.caption("Tip: add customers in the Customers tab.")
+
+        notes = st.text_input("Bill / Invoice No. or Notes", key="sale_notes", placeholder="Invoice no / payment mode / remarks")
+
+        # LIVE TOTAL PRICE
+        line_total = _to_float(qty_text) * _to_float(price_text)
+        st.markdown(f"<div class='amount'>Line Total: ₹ {line_total:,.2f}</div>", unsafe_allow_html=True)
+
         if st.button("Save Sale"):
+            qty = _to_float(qty_text)
+            price = _to_float(price_text)
             if qty <= 0:
                 st.error("Quantity must be > 0.")
             else:
                 add_move("sale", p["id"], qty, price_per_unit=(price or None),
                          customer_id=customer_id, notes=notes or None)
-                st.success(f"Sale saved. (Customer: {customer_name or 'N/A'})")
+                st.success("Sale saved.")
+                for k in ["sale_qty","sale_price","sale_notes","sale_customer"]:
+                    st.session_state[k] = ""
+                st.rerun()
 
-        # Live stock indicator
         if stock_now < 0:
             st.caption(f"<span class='negative'>Current stock: {stock_now} {p['unit']} (negative)</span>", unsafe_allow_html=True)
         else:
             st.caption(f"Current stock: **{stock_now} {p['unit']}**")
 
-# --- Stock & Low Stock ---
+    # ---- Quick Bill Entry — Sale (multiple items) with subtotal ----
+    st.divider()
+    st.markdown("### 🧾 Quick Bill Entry — Sale (multiple items)")
+
+    if "qbe_sale_rows" not in st.session_state:
+        st.session_state.qbe_sale_rows = [{"description":"", "qty":"", "rate":"", "unit":"pcs", "size":""} for _ in range(8)]
+
+    bill_no_out = st.text_input("Bill / Invoice No. (optional)", key="bill_no_out")
+    cust_out_name = st.text_input("Customer Name (optional)", key="customer_out")
+    default_mat_out = st.selectbox("Default Material (for new products)",
+                                   ["Tiles", "Granites", "Marble", "Sanitary", "CP", "MYK", "Other"],
+                                   index=0, key="mat_out")
+
+    df_edit = pd.DataFrame(st.session_state.qbe_sale_rows)
+    data_out = st.data_editor(
+        df_edit,
+        use_container_width=True,
+        num_rows="dynamic",
+        key="bill_editor_out",
+        column_config={
+            "description": st.column_config.TextColumn("Description"),
+            "qty": st.column_config.TextColumn("Qty"),
+            "rate": st.column_config.TextColumn("Rate"),
+            "unit": st.column_config.SelectboxColumn("Unit", options=["pcs","boxs","sq_ft","bags","kgs"], default="pcs"),
+            "size": st.column_config.TextColumn("Size (optional)")
+        }
+    )
+
+    # Compute subtotal live
+    try:
+        tmp = pd.DataFrame(data_out)
+        tmp["q"] = tmp["qty"].apply(_to_float)
+        tmp["r"] = tmp["rate"].apply(_to_float)
+        subtotal = float((tmp["q"] * tmp["r"]).sum())
+    except Exception:
+        subtotal = 0.0
+    st.markdown(f"**Bill Subtotal:** ₹ {subtotal:,.2f}")
+
+    # Save function for quick bill (auto-creates products if missing)
+    def get_product_by_name_unit(name: str, unit: str):
+        rows = run_query(
+            "SELECT * FROM products WHERE lower(name)=? AND unit=?",
+            (name.strip().lower(), unit), fetch=True
+        )
+        return dict(rows[0]) if rows else None
+
+    def ensure_product(name: str, unit: str, material: str = None, size: str = None, opening_stock: float = 0.0):
+        p = get_product_by_name_unit(name, unit)
+        if p:
+            return p["id"]
+        add_product(name=name, material=material, size=size, unit=unit, opening_stock=opening_stock)
+        p = get_product_by_name_unit(name, unit)
+        return p["id"]
+
+    def ensure_customer_by_name(name: str):
+        nm = (name or "").strip()
+        if not nm:
+            return None
+        rows = run_query("SELECT * FROM customers WHERE lower(name)=?", (nm.lower(),), fetch=True)
+        if rows:
+            return dict(rows[0])["id"]
+        add_customer(nm, None, None)
+        rows = run_query("SELECT * FROM customers WHERE lower(name)=?", (nm.lower(),), fetch=True)
+        return dict(rows[0])["id"]
+
+    if st.button("Save Sales Bill"):
+        try:
+            lines = pd.DataFrame(data_out).to_dict(orient="records")
+            cust_id = ensure_customer_by_name(cust_out_name)
+            saved = 0
+            for ln in lines:
+                desc = (ln.get("description") or "").strip()
+                if not desc:
+                    continue
+                qty = _to_float(ln.get("qty"))
+                rate = _to_float(ln.get("rate"))
+                unit = (ln.get("unit") or "pcs").strip()
+                size = (ln.get("size") or "").strip() or None
+                if qty <= 0:
+                    continue
+                pid = ensure_product(desc, unit, material=default_mat_out, size=size)
+                note = f"Bill {bill_no_out}".strip() if bill_no_out else None
+                add_move("sale", pid, qty, price_per_unit=(rate or None), customer_id=cust_id, notes=note)
+                saved += 1
+            if saved > 0:
+                st.success(f"Saved {saved} sale line(s).")
+                # reset table to blank
+                st.session_state.qbe_sale_rows = [{"description":"", "qty":"", "rate":"", "unit":"pcs", "size":""} for _ in range(8)]
+                for k in ["bill_no_out","customer_out"]:
+                    st.session_state[k] = ""
+                st.rerun()
+            else:
+                st.warning("Nothing to save. Enter at least one row with description and qty > 0.")
+        except Exception as e:
+            st.error(f"Could not save bill: {e}")
+
+# ===================== Stock & Low Stock =====================
 with tabs[4]:
     st.subheader("Stock Levels")
     prods = list_products()
     if prods:
         df = pd.DataFrame(prods)
         df["current_stock"] = df["id"].apply(product_stock)
-        # Add a readable warning column
         df["status"] = df["current_stock"].apply(lambda x: "NEGATIVE ⚠️" if x < 0 else "")
         low_thr = st.number_input("Low stock threshold (show items below this)", min_value=0.0, step=1.0, value=10.0)
         view = df[["id","name","material","size","unit","current_stock","status"]].sort_values("name")
@@ -366,7 +469,6 @@ with tabs[4]:
         else:
             st.dataframe(low[["id","name","size","unit","current_stock"]], use_container_width=True)
 
-        # Export
         if st.button("Export Stock to CSV"):
             out = df[["name","material","size","unit","current_stock"]].copy()
             out.to_csv("stock_export.csv", index=False)
@@ -374,18 +476,16 @@ with tabs[4]:
     else:
         st.info("No products yet.")
 
-# --- Daily Report ---
+# ===================== Daily Report =====================
 with tabs[5]:
     st.subheader("Daily Report (Sales & Purchases)")
     day = st.date_input("Pick a date", value=date.today())
     rows = moves_on_day(day)
     if rows:
         rep = pd.DataFrame(rows)
-        # readable columns
         rep["time"] = pd.to_datetime(rep["ts"]).dt.strftime("%H:%M")
         rep["qty_display"] = rep.apply(lambda r: f'{abs(r["qty"])} {r["unit"]}', axis=1)
         rep["value"] = rep.apply(lambda r: (abs(r["qty"]) * (r["price_per_unit"] or 0.0)), axis=1)
-        rep["neg_stock_note"] = ""  # placeholder
 
         st.markdown("#### All Movements Today")
         show = rep[["time","kind","product_name","qty_display","customer_name","price_per_unit","value","notes"]]
@@ -395,7 +495,6 @@ with tabs[5]:
         })
         st.dataframe(show, use_container_width=True)
 
-        # Sales summary by customer
         sales = rep[rep["kind"]=="sale"].copy()
         if not sales.empty:
             st.markdown("#### Who bought today (Sales by Customer)")
@@ -405,22 +504,17 @@ with tabs[5]:
             cust["Customer"] = cust["Customer"].fillna("N/A")
             st.dataframe(cust, use_container_width=True)
 
-        # Stock snapshot
         st.markdown("#### Stock Snapshot (End of Day)")
         prods = list_products()
         snap = []
         for p in prods:
             qty_left = product_stock(p["id"])
             snap.append({
-                "Product": p["name"],
-                "Size": p["size"],
-                "Unit": p["unit"],
-                "Stock Left": qty_left,
-                "Status": "NEGATIVE ⚠️" if qty_left < 0 else ""
+                "Product": p["name"], "Size": p["size"], "Unit": p["unit"],
+                "Stock Left": qty_left, "Status": "NEGATIVE ⚠️" if qty_left < 0 else ""
             })
         st.dataframe(pd.DataFrame(snap).sort_values("Product"), use_container_width=True)
 
-        # Export
         if st.button("Export Today’s Report to CSV"):
             show.to_csv(f"report_{day.isoformat()}.csv", index=False)
             st.success(f"Saved as report_{day.isoformat()}.csv")
