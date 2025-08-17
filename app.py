@@ -259,7 +259,6 @@ with tabs[0]:
         st.session_state.bulk_cust_df = pd.DataFrame(
             [{"name":"","phone":"","address":""} for _ in range(5)]
         )
-
     edited_cust = st.data_editor(
         st.session_state.bulk_cust_df,
         use_container_width=True,
@@ -332,7 +331,6 @@ with tabs[1]:
     st.divider()
     st.markdown("### 🧾 Quick Bill Entry — Purchase (multiple items)")
 
-    # keep one DataFrame in session
     if "qbe_purchase_df" not in st.session_state:
         st.session_state.qbe_purchase_df = pd.DataFrame(
             [{"product_name":"","size":"","qty":"","rate":"","unit":"pcs","material":"Tiles","comments":""}
@@ -342,7 +340,7 @@ with tabs[1]:
     bill_no_in = st.text_input("Bill / Invoice No. (optional)", key="bill_no_in")
     supplier_name = st.text_input("Supplier / Name (optional)", key="supplier_in")
 
-    # render editor with df from session
+    # Editor bound to a single DF in session (we never mutate it inside same run)
     edited_in = st.data_editor(
         st.session_state.qbe_purchase_df,
         use_container_width=True,
@@ -358,16 +356,16 @@ with tabs[1]:
             "comments": st.column_config.TextColumn("Comments")
         }
     )
-    # store edits back
+    # Store user edits back; do not auto-modify it
     st.session_state.qbe_purchase_df = edited_in.copy()
 
-    # auto-fill blank unit cells with first row unit (do not overwrite non-blank)
-    if len(st.session_state.qbe_purchase_df) > 0:
-        first_unit_in = str(st.session_state.qbe_purchase_df.iloc[0]["unit"] or "pcs")
-        mask_blank = st.session_state.qbe_purchase_df["unit"].astype(str).str.strip().eq("")
-        st.session_state.qbe_purchase_df.loc[mask_blank, "unit"] = first_unit_in
+    # For display math only: work on a copy and fill blank units from first row
+    calc_in = st.session_state.qbe_purchase_df.copy()
+    if len(calc_in) > 0:
+        first_unit_in = str(calc_in.iloc[0]["unit"] or "pcs")
+        calc_in["unit"] = calc_in["unit"].astype(str).fillna("").replace("", first_unit_in)
 
-    tmpi = st.session_state.qbe_purchase_df.copy()
+    tmpi = calc_in.copy()
     tmpi["q"] = pd.to_numeric(tmpi["qty"], errors="coerce").fillna(0.0)
     tmpi["r"] = pd.to_numeric(tmpi["rate"], errors="coerce").fillna(0.0)
     subtotal_in = float((tmpi["q"] * tmpi["r"]).sum())
@@ -375,7 +373,13 @@ with tabs[1]:
 
     if st.button("Save Purchase Bill"):
         try:
-            lines = st.session_state.qbe_purchase_df.fillna("").to_dict(orient="records")
+            # Apply unit defaults at save time (still not touching widget df)
+            save_in = st.session_state.qbe_purchase_df.copy().fillna("")
+            if len(save_in) > 0:
+                first_unit_in = str(save_in.iloc[0].get("unit") or "pcs")
+                save_in["unit"] = save_in["unit"].astype(str).replace("", first_unit_in)
+            lines = save_in.to_dict(orient="records")
+
             supplier_id = ensure_customer_by_name(supplier_name) if supplier_name else None
             saved = 0
             for ln in lines:
@@ -408,7 +412,7 @@ with tabs[1]:
             else:
                 st.warning("Nothing to save. Enter at least one row with Product Name, Size and Qty > 0.")
         except Exception as e:
-            st.error(f"Could not save purchase bill: {e}")
+            st.error(f"Could not save bill: {e}")
 
 # ===================== Sale (OUT) – Revamped =====================
 with tabs[2]:
@@ -488,13 +492,13 @@ with tabs[2]:
     )
     st.session_state.qbe_sale_df = edited_out.copy()
 
-    # fill blank units with first row unit only (don’t overwrite user-set values)
-    if len(st.session_state.qbe_sale_df) > 0:
-        first_unit = str(st.session_state.qbe_sale_df.iloc[0]["unit"] or "pcs")
-        mask_blank = st.session_state.qbe_sale_df["unit"].astype(str).str.strip().eq("")
-        st.session_state.qbe_sale_df.loc[mask_blank, "unit"] = first_unit
+    # For display: copy and fill blank units from first row (do NOT mutate widget DF)
+    calc_out = st.session_state.qbe_sale_df.copy()
+    if len(calc_out) > 0:
+        first_unit = str(calc_out.iloc[0]["unit"] or "pcs")
+        calc_out["unit"] = calc_out["unit"].astype(str).fillna("").replace("", first_unit)
 
-    tmp = st.session_state.qbe_sale_df.copy()
+    tmp = calc_out.copy()
     tmp["q"] = pd.to_numeric(tmp["qty"], errors="coerce").fillna(0.0)
     tmp["r"] = pd.to_numeric(tmp["rate"], errors="coerce").fillna(0.0)
     subtotal = float((tmp["q"] * tmp["r"]).sum())
@@ -502,7 +506,13 @@ with tabs[2]:
 
     if st.button("Save Sales Bill"):
         try:
-            lines = st.session_state.qbe_sale_df.fillna("").to_dict(orient="records")
+            # Apply unit defaults at save time only
+            save_out = st.session_state.qbe_sale_df.copy().fillna("")
+            if len(save_out) > 0:
+                first_unit = str(save_out.iloc[0].get("unit") or "pcs")
+                save_out["unit"] = save_out["unit"].astype(str).replace("", first_unit)
+            lines = save_out.to_dict(orient="records")
+
             cust_id = ensure_customer_by_name(cust_out_name)
             saved = 0
             for ln in lines:
@@ -609,5 +619,5 @@ with tabs[4]:
         st.info("No entries on this day yet.")
 
 st.divider()
-st.caption("Tip: Quick Bill keeps your typing stable. Units auto-fill only for blank unit cells from the first row (you can still edit any row).")
-st.caption("© 2023 Venkat Reddy. Inventory App for Tiles & Granites. Licensed under MIT.")
+st.caption("Tip: Quick Bill uses copies for totals and only applies unit defaults at save time, so your typing never gets overwritten.")
+st.caption("© 2023 Venkat Reddy. Inventory App for Tiles & Granites.")
