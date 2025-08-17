@@ -197,28 +197,15 @@ if "user" not in st.session_state:
     st.stop()  # do not show the rest of the app until logged in
 
 # Logged in – header + logout + change password
-st.success(f"Logged in as **{st.session_state.user['username']}**")
-colL, colR = st.columns([1,5])
-if colL.button("Logout"):
-    st.session_state.pop("user", None)
-    st.rerun()
+# Logged in – header + logout (top-right)
+top_left, top_right = st.columns([6, 1])
+with top_left:
+    st.success(f"Logged in as **{st.session_state.user['username']}**")
+with top_right:
+    if st.button("Logout"):
+        st.session_state.pop("user", None)
+        st.rerun()
 
-with colR.expander("Change my password"):
-    old = st.text_input("Old password", type="password", key="oldpw")
-    new1 = st.text_input("New password", type="password", key="newpw1")
-    new2 = st.text_input("Confirm new password", type="password", key="newpw2")
-    if st.button("Update password"):
-        if not old or not new1 or not new2:
-            st.error("Fill all fields.")
-        elif new1 != new2:
-            st.error("New passwords do not match.")
-        else:
-            who = verify_login(st.session_state.user["username"], old)
-            if not who:
-                st.error("Old password is incorrect.")
-            else:
-                change_password(st.session_state.user["username"], new1)
-                st.success("Password updated.")
 
 tabs = st.tabs([
     "➕ Add Products",
