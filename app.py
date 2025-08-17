@@ -71,7 +71,7 @@ def init_db():
             product_id INTEGER NOT NULL,
             qty REAL NOT NULL,
             price_per_unit REAL,           -- optional
-            customer_id INTEGER,           -- for sales
+            customer_id INTEGER,           -- for sales (or supplier for purchases)
             notes TEXT,
             FOREIGN KEY(product_id) REFERENCES products(id),
             FOREIGN KEY(customer_id) REFERENCES customers(id)
@@ -239,7 +239,7 @@ tabs = st.tabs([
 
 # ===================== Customers =====================
 with tabs[0]:
-    st.subheader("Add Customer")
+    st.subheader("Add Customer (single)")
     cname = st.text_input("Customer Name*", key="cust_name", placeholder="e.g., Suresh Constructions")
     cphone = st.text_input("Phone", key="cust_phone", placeholder="e.g., 9876543210")
     caddr = st.text_area("Address", key="cust_addr", placeholder="Area / City / Notes")
@@ -252,6 +252,40 @@ with tabs[0]:
             for k in ["cust_name","cust_phone","cust_addr"]:
                 st.session_state[k] = ""
             st.rerun()
+
+    st.divider()
+    st.subheader("Quick Add Customers (multiple)")
+    if "bulk_cust_rows" not in st.session_state:
+        st.session_state.bulk_cust_rows = [
+            {"name":"","phone":"","address":""} for _ in range(5)
+        ]
+    dfc = pd.DataFrame(st.session_state.bulk_cust_rows)
+    data_bulk = st.data_editor(
+        dfc, use_container_width=True, num_rows="dynamic",
+        key="bulk_customers_editor",
+        column_config={
+            "name": st.column_config.TextColumn("Customer Name (required)"),
+            "phone": st.column_config.TextColumn("Phone"),
+            "address": st.column_config.TextColumn("Address")
+        }
+    )
+    st.session_state.bulk_cust_rows = pd.DataFrame(data_bulk).to_dict(orient="records")
+    if st.button("Save Customers"):
+        rows = pd.DataFrame(st.session_state.bulk_cust_rows)
+        added = 0
+        for _, r in rows.iterrows():
+            nm = (str(r.get("name") or "").strip())
+            if not nm:
+                continue
+            add_customer(nm, str(r.get("phone") or "").strip(), str(r.get("address") or "").strip())
+            added += 1
+        if added:
+            st.success(f"Added {added} customer(s).")
+            st.session_state.bulk_cust_rows = [{"name":"","phone":"","address":""} for _ in range(5)]
+            st.rerun()
+        else:
+            st.info("Nothing to save. Enter at least one row with Customer Name.")
+
     st.divider()
     st.subheader("All Customers")
     custs = list_customers()
@@ -307,14 +341,9 @@ with tabs[1]:
 
     df_p = pd.DataFrame(st.session_state.qbe_purchase_rows)
 
-    pp1, pp2 = st.columns([1,3])
-    with pp1:
-        apply_unit_in = st.button("Apply first-row unit to all (Purchase)")
-    with pp2:
-        st.caption("Set the unit in the first row and click to copy to all rows. You can still edit later.")
-
-    if apply_unit_in and not df_p.empty:
-        first_unit_in = (df_p.loc[0, "unit"] or "pcs")
+    # AUTO-APPLY FIRST ROW'S UNIT TO ALL (no button)
+    if not df_p.empty:
+        first_unit_in = df_p.loc[0, "unit"] or "pcs"
         df_p["unit"] = first_unit_in
 
     data_in = st.data_editor(
@@ -449,14 +478,9 @@ with tabs[2]:
 
     df_edit = pd.DataFrame(st.session_state.qbe_sale_rows)
 
-    tt1, tt2 = st.columns([1,3])
-    with tt1:
-        apply_unit = st.button("Apply first-row unit to all")
-    with tt2:
-        st.caption("Set the unit in the first row and click to copy to all rows. You can still edit later.")
-
-    if apply_unit and not df_edit.empty:
-        first_unit = (df_edit.loc[0, "unit"] or "pcs")
+    # AUTO-APPLY FIRST ROW'S UNIT TO ALL (no button)
+    if not df_edit.empty:
+        first_unit = df_edit.loc[0, "unit"] or "pcs"
         df_edit["unit"] = first_unit
 
     data_out = st.data_editor(
