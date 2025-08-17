@@ -8,8 +8,8 @@ import hashlib, secrets
 DB_PATH = "inventory.db"
 
 # ======= SINGLE-USER CONFIG =======
-ALLOWED_USERS = {"grandpa"}          # <- only these usernames can login
-DEFAULT_USERNAME = "grandpa"         # <- created automatically if missing
+ALLOWED_USERS = {"Venkat Reddy"}          # <- only these usernames can login
+DEFAULT_USERNAME = "Reddy"         # <- created automatically if missing
 DEFAULT_PASSWORD = "1234"            # <- change this before giving it to him
 # ==================================
 
