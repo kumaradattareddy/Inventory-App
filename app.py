@@ -26,16 +26,15 @@ def create_user(username: str, password: str):
     username = username.strip().lower()
     salt = secrets.token_hex(16)
     pwd_hash = _hash_password(password, salt)
-    run_query(
-        "INSERT INTO users(username, password_hash, salt) VALUES(?,?,?)",
-        (username, pwd_hash, salt)
-    )
+    run_query("INSERT INTO users(username, password_hash, salt) VALUES(?,?,?)",
+              (username, pwd_hash, salt))
 
 def verify_login(username: str, password: str):
     username = username.strip().lower()
     if username not in ALLOWED_USERS:
         return None
-    row = run_query("SELECT username, password_hash, salt FROM users WHERE username=?", (username,), fetch=True)
+    row = run_query("SELECT username, password_hash, salt FROM users WHERE username=?",
+                    (username,), fetch=True)
     if not row:
         return None
     row = dict(row[0])
@@ -108,13 +107,15 @@ def product_stock(product_id):
     if not row:
         return 0.0
     opening = row[0]["opening_stock"] or 0.0
-    moves = run_query("SELECT COALESCE(SUM(qty),0) AS s FROM stock_moves WHERE product_id=?", (product_id,), fetch=True)
+    moves = run_query("SELECT COALESCE(SUM(qty),0) AS s FROM stock_moves WHERE product_id=?",
+                      (product_id,), fetch=True)
     return float(opening) + float(moves[0]["s"])
 
 def add_product(name, material, size, unit, opening_stock):
     run_query(
         "INSERT INTO products(name,material,size,unit,opening_stock) VALUES(?,?,?,?,?)",
-        (name.strip(), material.strip() if material else None, size.strip() if size else None, unit, opening_stock)
+        (name.strip(), material.strip() if material else None,
+         size.strip() if size else None, unit, opening_stock)
     )
 
 def add_customer(name, phone, address):
@@ -228,7 +229,7 @@ with top_right:
         st.session_state.pop("user", None)
         st.rerun()
 
-# --------- TABS (no Add Products) ----------
+# --------- TABS ----------
 tabs = st.tabs([
     "👥 Customers",
     "📦 Purchase (Stock In)",
@@ -256,9 +257,7 @@ with tabs[0]:
     st.divider()
     st.subheader("Quick Add Customers (multiple)")
     if "bulk_cust_rows" not in st.session_state:
-        st.session_state.bulk_cust_rows = [
-            {"name":"","phone":"","address":""} for _ in range(5)
-        ]
+        st.session_state.bulk_cust_rows = [{"name":"","phone":"","address":""} for _ in range(5)]
     dfc = pd.DataFrame(st.session_state.bulk_cust_rows)
     data_bulk = st.data_editor(
         dfc, use_container_width=True, num_rows="dynamic",
@@ -299,7 +298,7 @@ with tabs[1]:
     st.subheader("Record Purchase (Stock In)")
     prods = list_products()
     if not prods:
-        st.info("No products yet — but don't worry, products will be auto-created in the Quick Bill below.")
+        st.info("No products yet — but products will be auto-created in the Quick Bill below.")
     else:
         prod_map = {f'{p["name"]} ({p["size"] or ""} | {p["unit"]})': p for p in prods}
         choice = st.selectbox("Product*", list(prod_map.keys()), key="purchase_product")
@@ -339,13 +338,8 @@ with tabs[1]:
     bill_no_in = st.text_input("Bill / Invoice No. (optional)", key="bill_no_in")
     supplier_name = st.text_input("Supplier / Name (optional)", key="supplier_in")
 
+    # 1) Render editor with current state
     df_p = pd.DataFrame(st.session_state.qbe_purchase_rows)
-
-    # AUTO-APPLY FIRST ROW'S UNIT TO ALL (no button)
-    if not df_p.empty:
-        first_unit_in = df_p.loc[0, "unit"] or "pcs"
-        df_p["unit"] = first_unit_in
-
     data_in = st.data_editor(
         df_p,
         use_container_width=True,
@@ -362,19 +356,30 @@ with tabs[1]:
         }
     )
 
-    # Persist editor state
-    st.session_state.qbe_purchase_rows = pd.DataFrame(data_in).to_dict(orient="records")
+    # 2) Normalize & auto-apply unit AFTER edit
+    data_in = pd.DataFrame(data_in).fillna("")
+    required_cols = ["product_name","size","qty","rate","unit","material","comments"]
+    for c in required_cols:
+        if c not in data_in.columns:
+            data_in[c] = ""
+    if len(data_in) > 0:
+        first_unit_in = (str(data_in.loc[0, "unit"]) or "pcs")
+        data_in["unit"] = first_unit_in
 
-    # Subtotal
+    # 3) Persist back to session
+    st.session_state.qbe_purchase_rows = data_in.to_dict(orient="records")
+
+    # 4) Subtotal
     try:
-        tmpi = pd.DataFrame(data_in)
-        tmpi["q"] = tmpi["qty"].apply(lambda x: float(x) if str(x).strip() else 0.0)
-        tmpi["r"] = tmpi["rate"].apply(lambda x: float(x) if str(x).strip() else 0.0)
+        tmpi = data_in.copy()
+        tmpi["q"] = pd.to_numeric(tmpi["qty"], errors="coerce").fillna(0.0)
+        tmpi["r"] = pd.to_numeric(tmpi["rate"], errors="coerce").fillna(0.0)
         subtotal_in = float((tmpi["q"] * tmpi["r"]).sum())
     except Exception:
         subtotal_in = 0.0
     st.markdown(f"**Bill Subtotal (Purchase):** ₹ {subtotal_in:,.2f}")
 
+    # 5) Save bill lines
     if st.button("Save Purchase Bill"):
         try:
             lines = pd.DataFrame(st.session_state.qbe_purchase_rows).to_dict(orient="records")
@@ -385,25 +390,23 @@ with tabs[1]:
                 size = (ln.get("size") or "").strip()
                 if not name or not size:
                     continue
-
-                qty = _to_float(ln.get("qty"))
+                qty  = _to_float(ln.get("qty"))
                 rate = _to_float(ln.get("rate"))
                 unit = (ln.get("unit") or "pcs").strip()
                 material = (ln.get("material") or "Tiles").strip()
                 comments = (ln.get("comments") or "").strip()
-
                 if qty <= 0:
                     continue
-
                 pid = ensure_product(name, size=size, unit=unit, material=material)
                 note = " | ".join([s for s in [f"Bill {bill_no_in}" if bill_no_in else None, comments or None] if s])
-                add_move("purchase", pid, qty, price_per_unit=(rate or None), customer_id=supplier_id, notes=(note or None))
+                add_move("purchase", pid, qty, price_per_unit=(rate or None),
+                         customer_id=supplier_id, notes=(note or None))
                 saved += 1
 
             if saved > 0:
                 st.success(f"Saved {saved} purchase line(s).")
                 st.session_state.qbe_purchase_rows = [
-                    {"product_name":"", "size":"", "qty":"", "rate":"", "unit":"pcs", "material":"Tiles", "comments":""}
+                    {"product_name":"", "size":"","qty":"","rate":"","unit":"pcs","material":"Tiles","comments":""}
                     for _ in range(8)
                 ]
                 for k in ["bill_no_in","supplier_in"]:
@@ -476,13 +479,8 @@ with tabs[2]:
     bill_no_out = st.text_input("Bill / Invoice No. (optional)", key="bill_no_out")
     cust_out_name = st.text_input("Customer Name (optional)", key="customer_out")
 
+    # 1) Render editor with current state
     df_edit = pd.DataFrame(st.session_state.qbe_sale_rows)
-
-    # AUTO-APPLY FIRST ROW'S UNIT TO ALL (no button)
-    if not df_edit.empty:
-        first_unit = df_edit.loc[0, "unit"] or "pcs"
-        df_edit["unit"] = first_unit
-
     data_out = st.data_editor(
         df_edit,
         use_container_width=True,
@@ -499,50 +497,57 @@ with tabs[2]:
         }
     )
 
-    # Persist editor state
-    st.session_state.qbe_sale_rows = pd.DataFrame(data_out).to_dict(orient="records")
+    # 2) Normalize & auto-apply unit AFTER edit
+    data_out = pd.DataFrame(data_out).fillna("")
+    required_cols = ["product_name","size","qty","rate","unit","material","comments"]
+    for c in required_cols:
+        if c not in data_out.columns:
+            data_out[c] = ""
+    if len(data_out) > 0:
+        first_unit = (str(data_out.loc[0, "unit"]) or "pcs")
+        data_out["unit"] = first_unit
 
-    # Subtotal
+    # 3) Persist back to session
+    st.session_state.qbe_sale_rows = data_out.to_dict(orient="records")
+
+    # 4) Subtotal
     try:
-        tmp = pd.DataFrame(data_out)
-        tmp["q"] = tmp["qty"].apply(lambda x: float(x) if str(x).strip() else 0.0)
-        tmp["r"] = tmp["rate"].apply(lambda x: float(x) if str(x).strip() else 0.0)
+        tmp = data_out.copy()
+        tmp["q"] = pd.to_numeric(tmp["qty"], errors="coerce").fillna(0.0)
+        tmp["r"] = pd.to_numeric(tmp["rate"], errors="coerce").fillna(0.0)
         subtotal = float((tmp["q"] * tmp["r"]).sum())
     except Exception:
         subtotal = 0.0
     st.markdown(f"**Bill Subtotal:** ₹ {subtotal:,.2f}")
 
-    # Save bill lines
+    # 5) Save bill lines
     if st.button("Save Sales Bill"):
         try:
             lines = pd.DataFrame(st.session_state.qbe_sale_rows).to_dict(orient="records")
             cust_id = ensure_customer_by_name(cust_out_name)
             saved = 0
-
             for ln in lines:
                 name = (ln.get("product_name") or "").strip()
                 size = (ln.get("size") or "").strip()
                 if not name or not size:
-                    continue  # size is required
-
-                qty = _to_float(ln.get("qty"))
+                    continue
+                qty  = _to_float(ln.get("qty"))
                 rate = _to_float(ln.get("rate"))
                 unit = (ln.get("unit") or "pcs").strip()
                 material = (ln.get("material") or "Tiles").strip()
                 comments = (ln.get("comments") or "").strip()
-
                 if qty <= 0:
                     continue
-
                 pid = ensure_product(name, size=size, unit=unit, material=material)
                 note = " | ".join([s for s in [f"Bill {bill_no_out}" if bill_no_out else None, comments or None] if s])
-                add_move("sale", pid, qty, price_per_unit=(rate or None), customer_id=cust_id, notes=(note or None))
+                add_move("sale", pid, qty, price_per_unit=(rate or None),
+                         customer_id=cust_id, notes=(note or None))
                 saved += 1
 
             if saved > 0:
                 st.success(f"Saved {saved} sale line(s).")
                 st.session_state.qbe_sale_rows = [
-                    {"product_name":"", "size":"", "qty":"", "rate":"", "unit":"pcs", "material":"Tiles", "comments":""}
+                    {"product_name":"", "size":"","qty":"","rate":"","unit":"pcs","material":"Tiles","comments":""}
                     for _ in range(8)
                 ]
                 for k in ["bill_no_out","customer_out"]:
@@ -625,5 +630,5 @@ with tabs[4]:
         st.info("No entries on this day yet.")
 
 st.divider()
-st.caption("Tip: Quick Bill lets you enter many lines fast; products are created automatically using Product Name + Size + Unit.")
-st.caption("© 2023 Venkat Reddy. Inventory App for Tiles & Granites.")
+st.caption("Tip: Quick Bill lets you enter many lines fast; products are created automatically using Product Name + Size + Unit. The unit you set in the first row auto-fills the rest (you can still edit any row).")
+st.caption("© 2023 Venkat Reddy. Inventory App for Tiles & Granites. Built with Streamlit.")
