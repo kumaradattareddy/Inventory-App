@@ -7,14 +7,13 @@ import streamlit as st
 import hashlib, secrets
 
 # ===================== Paths / DB file =====================
-# Always keep the DB next to this script (stable, not working-dir dependent)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH  = os.path.join(BASE_DIR, "inventory.db")
 
 # ======= SINGLE-USER CONFIG (must be lowercase) =======
-ALLOWED_USERS = {"venkat reddy"}      # only these usernames can login
-DEFAULT_USERNAME = "venkat reddy"     # must be in ALLOWED_USERS
-DEFAULT_PASSWORD = "1234"             # change after first login
+ALLOWED_USERS = {"venkat reddy"}
+DEFAULT_USERNAME = "venkat reddy"
+DEFAULT_PASSWORD = "1234"
 # ======================================================
 
 # ---------- AUTH ----------
@@ -131,16 +130,14 @@ def add_customer(name, phone, address):
 def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, notes=None,
              when: datetime | None = None, dedupe_window_seconds: int = 120) -> bool:
     """
-    Inserts a stock move. Returns True if inserted, False if skipped as duplicate.
+    Insert a stock move. Returns True if inserted, False if skipped as duplicate.
     Dedupes identical moves within the last `dedupe_window_seconds`.
     """
     ts_dt = (when or datetime.now())
-    # For sales, we store qty negative
     ins_qty = -qty if (kind == "sale" and qty > 0) else qty
 
     if dedupe_window_seconds and dedupe_window_seconds > 0:
         since = (ts_dt - timedelta(seconds=dedupe_window_seconds)).isoformat(timespec="seconds")
-        # identical means: same kind, product_id, qty, price, customer, notes within window
         dup = run_query("""
             SELECT 1 FROM stock_moves
             WHERE kind=? AND product_id=? AND qty=?
@@ -208,7 +205,7 @@ def _to_float(txt: str) -> float:
     except:
         return 0.0
 
-# ---------- ROW FORM (Material, Size, Product Name, Unit, Qty, Rate, Amount; No Comments) ----------
+# ---------- ROW FORM ----------
 # Default unit first = "box"
 DEFAULT_UNIT_OPTIONS = ["box", "pcs", "sq_ft", "bag", "kg"]
 DEFAULT_MATERIAL_OPTIONS = ["Tiles", "Granite", "Marble", "Other"]
@@ -227,8 +224,7 @@ def _row_amount(qty_txt: str, rate_txt: str) -> float:
 
 def row_form(session_key: str, title: str):
     """
-    Arranges fields as: Material, Size, Product Name, Unit, Qty, Rate, Amount.
-    Comments field removed.
+    Fields: Material, Size, Product Name, Unit, Qty, Rate, Amount.
     """
     ensure_rows(session_key)
     rows = st.session_state[session_key]
@@ -252,7 +248,6 @@ def row_form(session_key: str, title: str):
     if subtotal_key not in st.session_state:
         st.session_state[subtotal_key] = 0.0
 
-    # Columns: Material, Size, Product Name, Unit, Qty, Rate, Amount
     with st.form(f"form_{session_key}", clear_on_submit=False):
         labs = st.columns([1.1, 1.1, 2, 0.9, 0.8, 0.9, 1.1])
         labs[0].markdown("**Material**")
@@ -266,7 +261,7 @@ def row_form(session_key: str, title: str):
         for i, r in enumerate(rows):
             cols = st.columns([1.1, 1.1, 2, 0.9, 0.8, 0.9, 1.1])
 
-            # 1. Material (selectbox, keep custom if present)
+            # 1. Material
             mat_current = (r.get("material") or "").strip()
             mat_options = DEFAULT_MATERIAL_OPTIONS.copy()
             if mat_current and mat_current not in mat_options:
@@ -284,7 +279,7 @@ def row_form(session_key: str, title: str):
             with cols[2]:
                 st.text_input("", value=r.get("product_name",""), key=f"{session_key}_name_{i}", placeholder="e.g., Renite")
 
-            # 4. Unit (selectbox, keep custom if present)
+            # 4. Unit
             unit_current = (r.get("unit") or "").strip()
             unit_options = DEFAULT_UNIT_OPTIONS.copy()
             if unit_current and unit_current not in unit_options:
@@ -302,7 +297,7 @@ def row_form(session_key: str, title: str):
             with cols[5]:
                 st.text_input("", value=r.get("rate",""), key=f"{session_key}_rate_{i}", placeholder="")
 
-            # 7. Amount (computed from widget values if present)
+            # 7. Amount
             qty_widget_val = st.session_state.get(f"{session_key}_qty_{i}", r.get("qty",""))
             rate_widget_val = st.session_state.get(f"{session_key}_rate_{i}", r.get("rate",""))
             amt = _row_amount(qty_widget_val, rate_widget_val)
@@ -351,6 +346,19 @@ label { font-size: 18px !important; }
 [data-testid="stForm"] { padding: 0.75rem 1rem; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); }
 </style>
 """, unsafe_allow_html=True)
+
+# ---- scheduled widget resets (fixes "cannot be modified after widget..." error) ----
+def _apply_scheduled_resets():
+    keys = st.session_state.pop("_reset_keys", None)
+    if keys:
+        for k in set(keys):
+            st.session_state.pop(k, None)
+_apply_scheduled_resets()
+
+def _schedule_reset(*keys):
+    pending = set(st.session_state.get("_reset_keys", []))
+    pending.update(keys)
+    st.session_state["_reset_keys"] = list(pending)
 
 # Init DB and ensure default user exists
 init_db()
@@ -406,8 +414,7 @@ with tabs[0]:
         else:
             add_customer(cname, cphone, caddr)
             st.success("Customer added.")
-            for k in ["cust_name","cust_phone","cust_addr"]:
-                st.session_state[k] = ""
+            _schedule_reset("cust_name","cust_phone","cust_addr")
             st.rerun()
 
     st.divider()
@@ -447,8 +454,7 @@ with tabs[1]:
                     st.success("Purchase saved.")
                 else:
                     st.warning("Skipped duplicate purchase (same line recently saved).")
-                for k in ["purchase_qty","purchase_price","purchase_notes"]:
-                    st.session_state[k] = ""
+                _schedule_reset("purchase_qty","purchase_price","purchase_notes")
                 st.rerun()
 
         st.caption(f"Current stock: **{product_stock(p['id'])} {p['unit']}**")
@@ -469,10 +475,10 @@ with tabs[1]:
                         return val
                 return fallback
 
-            unit_default = first_non_blank(rows_in, "unit", "box")  # default to box
+            unit_default = first_non_blank(rows_in, "unit", "box")
             mat_default  = first_non_blank(rows_in, "material", "Tiles")
-
             supplier_id = ensure_customer_by_name(supplier_name) if supplier_name else None
+
             saved = 0
             created_only = 0
             for ln in rows_in:
@@ -485,7 +491,6 @@ with tabs[1]:
                 unit = (ln.get("unit") or unit_default).strip()
                 material = (ln.get("material") or mat_default).strip()
 
-                # Ensure product exists even if qty is 0
                 pid = ensure_product(name, size=size, unit=unit, material=material)
 
                 if qty > 0:
@@ -494,20 +499,17 @@ with tabs[1]:
                                 customer_id=supplier_id, notes=(note or None)):
                         saved += 1
                 else:
-                    created_only += 1  # product created with zero stock
+                    created_only += 1
 
             if saved or created_only:
-                msg = []
-                if saved:
-                    msg.append(f"Saved {saved} purchase line(s)")
-                if created_only:
-                    msg.append(f"created {created_only} new product(s) at 0 stock")
-                st.success(", ".join(msg) + ".")
+                parts = []
+                if saved: parts.append(f"Saved {saved} purchase line(s)")
+                if created_only: parts.append(f"created {created_only} new product(s) at 0 stock")
+                st.success(", ".join(parts) + ".")
                 st.session_state["rows_purchase"] = [
                     {"material":"","product_name":"","size":"","unit":"","qty":"","rate":""} for _ in range(6)
                 ]
-                for k in ["bill_no_in","supplier_in"]:
-                    st.session_state[k] = ""
+                _schedule_reset("bill_no_in","supplier_in")
                 st.rerun()
             else:
                 st.warning("Nothing to save. Fill at least Product, Size and Qty.")
@@ -551,8 +553,7 @@ with tabs[2]:
                     st.success("Sale saved.")
                 else:
                     st.warning("Skipped duplicate sale (same line recently saved).")
-                for k in ["sale_qty","sale_price","sale_notes","sale_customer"]:
-                    st.session_state[k] = ""
+                _schedule_reset("sale_qty","sale_price","sale_notes","sale_customer")
                 st.rerun()
 
         if stock_now < 0:
@@ -575,7 +576,7 @@ with tabs[2]:
                         return val
                 return fallback
 
-            unit_default = first_non_blank(rows_out, "unit", "box")  # default to box
+            unit_default = first_non_blank(rows_out, "unit", "box")
             mat_default  = first_non_blank(rows_out, "material", "Tiles")
             cust_id = ensure_customer_by_name(cust_out_name)
 
@@ -602,8 +603,7 @@ with tabs[2]:
                 st.session_state["rows_sale"] = [
                     {"material":"","product_name":"","size":"","unit":"","qty":"","rate":""} for _ in range(6)
                 ]
-                for k in ["bill_no_out","customer_out"]:
-                    st.session_state[k] = ""
+                _schedule_reset("bill_no_out","customer_out")
                 st.rerun()
             else:
                 st.warning("Nothing to save. Fill at least Product, Size and Qty > 0.")
@@ -620,7 +620,7 @@ with tabs[3]:
         df["status"] = df["current_stock"].apply(lambda x: "NEGATIVE ⚠️" if x < 0 else "")
         low_thr = st.number_input("Low stock threshold (show items below this)", min_value=0.0, step=1.0, value=10.0)
 
-        # Sort by Size then Name, and hide the raw id column (you asked to show name/supplier instead of id)
+        # Sort by Size then Name, and show names (no raw id column)
         view = df[["name","material","size","unit","current_stock","status"]].sort_values(["size","name"], na_position="last")
         st.dataframe(view, use_container_width=True)
 
@@ -669,7 +669,7 @@ with tabs[4]:
         by_bill["Bill / Notes"] = by_bill["Bill / Notes"].fillna("N/A")
         st.dataframe(by_bill.sort_values(["kind","Bill / Notes"]), use_container_width=True)
 
-        # Sales by Customer (unchanged)
+        # Sales by Customer
         sales = rep[rep["kind"]=="sale"].copy()
         if not sales.empty:
             st.markdown("#### Who bought today (Sales by Customer)")
@@ -699,3 +699,4 @@ with tabs[4]:
 
 st.divider()
 st.caption("Quick Bill uses a form that won’t refresh while typing. Click **Update Items** to apply changes. Per-row Amount and a grand Subtotal are shown for clarity.")
+st.caption("© 2023 Venkat Reddy. Inventory App for Tiles & Granite business.")
