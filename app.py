@@ -231,7 +231,7 @@ with tabs[0]:
     with colB:
         unit = st.selectbox(
             "Unit*",
-            ["pcs", "box", "sq_ft", "sq_m", "bags", "kgs"],
+            ["pcs", "box", "sq_ft", "bags", "kgs"],
             index=0
         )
         opening = st.number_input("Opening Stock", min_value=0.0, step=1.0, value=0.0,
