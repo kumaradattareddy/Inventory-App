@@ -1,9 +1,11 @@
+import json
 import sqlite3
 from contextlib import closing
 from datetime import date, datetime
+import hashlib, secrets
+
 import pandas as pd
 import streamlit as st
-import hashlib, secrets
 
 DB_PATH = "inventory.db"
 
@@ -111,17 +113,31 @@ def product_stock(product_id):
                       (product_id,), fetch=True)
     return float(opening) + float(moves[0]["s"])
 
+def last_party_for_product(product_id):
+    rows = run_query(
+        """
+        SELECT COALESCE(c.name,'') AS party
+        FROM stock_moves m
+        LEFT JOIN customers c ON c.id = m.customer_id
+        WHERE m.product_id=?
+        ORDER BY m.ts DESC
+        LIMIT 1
+        """,
+        (product_id,), fetch=True
+    )
+    return rows[0]["party"] if rows else ""
+
 def add_product(name, material, size, unit, opening_stock):
     run_query(
         "INSERT INTO products(name,material,size,unit,opening_stock) VALUES(?,?,?,?,?)",
-        (name.strip(), material.strip() if material else None,
-         size.strip() if size else None, unit, opening_stock)
+        (name.strip(), (material or "").strip() or None,
+         (size or "").strip() or None, unit, opening_stock)
     )
 
 def add_customer(name, phone, address):
     run_query(
         "INSERT INTO customers(name,phone,address) VALUES(?,?,?)",
-        (name.strip(), phone.strip() if phone else None, address.strip() if address else None)
+        (name.strip(), (phone or "").strip() or None, (address or "").strip() or None)
     )
 
 def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, notes=None, when=None):
@@ -137,12 +153,12 @@ def moves_on_day(d: date):
     start = datetime(d.year, d.month, d.day, 0, 0, 0).isoformat(timespec="seconds")
     end   = datetime(d.year, d.month, d.day, 23, 59, 59).isoformat(timespec="seconds")
     rows = run_query("""
-        SELECT m.*, p.name AS product_name, p.unit, c.name AS customer_name
+        SELECT m.*, p.name AS product_name, p.size AS product_size, p.unit, c.name AS customer_name
         FROM stock_moves m
         JOIN products p ON p.id = m.product_id
         LEFT JOIN customers c ON c.id = m.customer_id
         WHERE m.ts BETWEEN ? AND ?
-        ORDER BY m.ts
+        ORDER BY p.size, p.name, m.ts
     """, (start, end), fetch=True)
     return [dict(r) for r in rows]
 
@@ -181,8 +197,12 @@ def _to_float(txt: str) -> float:
     except:
         return 0.0
 
+def _payload_hash(obj) -> str:
+    return hashlib.sha1(json.dumps(obj, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
 # ---------- ROW FORM (Material, Size, Product Name, Unit, Qty, Rate, Amount; No Comments) ----------
-DEFAULT_UNIT_OPTIONS = ["pcs", "box", "sq_ft", "bag", "kg"]
+# Put "box" first so it becomes the default selection
+DEFAULT_UNIT_OPTIONS = ["box", "pcs", "sq_ft", "bag", "kg"]
 DEFAULT_MATERIAL_OPTIONS = ["Tiles", "Granite", "Marble", "Other"]
 
 def ensure_rows(session_key: str, start_rows: int = 6):
@@ -215,7 +235,7 @@ def row_form(session_key: str, title: str):
     with c2:
         if st.button("🧹 Clear", key=f"clear_{session_key}"):
             st.session_state[session_key] = [
-                {"material":"","size":"","prodcut_name":"","unit":"","qty":"","rate":""} for _ in range(6)
+                {"material":"","size":"","product_name":"","unit":"","qty":"","rate":""} for _ in range(6)
             ]
             st.rerun()
     st.caption("Tip: type freely; the table won’t refresh until you click **Update Items**.")
@@ -238,7 +258,7 @@ def row_form(session_key: str, title: str):
         for i, r in enumerate(rows):
             cols = st.columns([1.1, 1.1, 2, 0.9, 0.8, 0.9, 1.1])
 
-            # 1. Material (selectbox, keep custom if present)
+            # 1. Material
             mat_current = (r.get("material") or "").strip()
             mat_options = DEFAULT_MATERIAL_OPTIONS.copy()
             if mat_current and mat_current not in mat_options:
@@ -256,7 +276,7 @@ def row_form(session_key: str, title: str):
             with cols[2]:
                 st.text_input("", value=r.get("product_name",""), key=f"{session_key}_name_{i}", placeholder="e.g., Renite")
 
-            # 4. Unit (selectbox, keep custom if present)
+            # 4. Unit
             unit_current = (r.get("unit") or "").strip()
             unit_options = DEFAULT_UNIT_OPTIONS.copy()
             if unit_current and unit_current not in unit_options:
@@ -274,7 +294,7 @@ def row_form(session_key: str, title: str):
             with cols[5]:
                 st.text_input("", value=r.get("rate",""), key=f"{session_key}_rate_{i}", placeholder="")
 
-            # 7. Amount (computed from widget values if present)
+            # 7. Amount
             qty_widget_val = st.session_state.get(f"{session_key}_qty_{i}", r.get("qty",""))
             rate_widget_val = st.session_state.get(f"{session_key}_rate_{i}", r.get("rate",""))
             amt = _row_amount(qty_widget_val, rate_widget_val)
@@ -286,12 +306,12 @@ def row_form(session_key: str, title: str):
             subtotal = 0.0
             new_rows = []
             for i, _ in enumerate(rows):
-                mat   = st.session_state.get(f"{session_key}_mat_{i}", "").strip()
-                size  = st.session_state.get(f"{session_key}_size_{i}", "").strip()
-                name  = st.session_state.get(f"{session_key}_name_{i}", "").strip()
-                unit  = st.session_state.get(f"{session_key}_unit_{i}", "").strip()
-                qty   = st.session_state.get(f"{session_key}_qty_{i}", "").strip()
-                rate  = st.session_state.get(f"{session_key}_rate_{i}", "").strip()
+                mat   = (st.session_state.get(f"{session_key}_mat_{i}", "") or "").strip()
+                size  = (st.session_state.get(f"{session_key}_size_{i}", "") or "").strip()
+                name  = (st.session_state.get(f"{session_key}_name_{i}", "") or "").strip()
+                unit  = (st.session_state.get(f"{session_key}_unit_{i}", "") or "").strip()
+                qty   = (st.session_state.get(f"{session_key}_qty_{i}", "") or "").strip()
+                rate  = (st.session_state.get(f"{session_key}_rate_{i}", "") or "").strip()
                 new_rows.append({
                     "material": mat,
                     "product_name": name,
@@ -302,7 +322,7 @@ def row_form(session_key: str, title: str):
                 })
                 subtotal += _row_amount(qty, rate)
             st.session_state[session_key] = new_rows if new_rows else [
-                {"material":"","product_name":"","size":"","unit":"","qty":"","rate":""} for _ in range(6)
+                {"material":"","size":"","product_name":"","unit":"","qty":"","rate":""} for _ in range(6)
             ]
             st.session_state[subtotal_key] = subtotal
             st.rerun()
@@ -429,48 +449,54 @@ with tabs[1]:
     supplier_name = st.text_input("Supplier / Name (optional)", key="supplier_in")
 
     rows_in, subtotal_in = row_form("rows_purchase", "Items")
+
     if st.button("Save Purchase Bill", key="save_purchase_bill"):
         try:
-            # decide defaults only now
-            def first_non_blank(items, key, fallback):
-                for r in items:
-                    val = (r.get(key) or "").strip()
-                    if val:
-                        return val
-                return fallback
-
-            unit_default = first_non_blank(rows_in, "unit", "pcs")
-            mat_default  = first_non_blank(rows_in, "material", "Tiles")
-
-            supplier_id = ensure_customer_by_name(supplier_name) if supplier_name else None
-            saved = 0
-            for ln in rows_in:
-                name = (ln.get("product_name") or "").strip()
-                size = (ln.get("size") or "").strip()
-                if not name or not size:
-                    continue
-                qty  = _to_float(ln.get("qty"))
-                rate = _to_float(ln.get("rate"))
-                unit = (ln.get("unit") or unit_default).strip()
-                material = (ln.get("material") or mat_default).strip()
-                if qty <= 0:
-                    continue
-                pid = ensure_product(name, size=size, unit=unit, material=material)
-                note = f"Bill {bill_no_in}" if bill_no_in else None
-                add_move("purchase", pid, qty, price_per_unit=(rate or None),
-                         customer_id=supplier_id, notes=(note or None))
-                saved += 1
-
-            if saved:
-                st.success(f"Saved {saved} purchase line(s).")
-                st.session_state["rows_purchase"] = [
-                    {"material":"","product_name":"","size":"","unit":"","qty":"","rate":""} for _ in range(6)
-                ]
-                for k in ["bill_no_in","supplier_in"]:
-                    st.session_state[k] = ""
-                st.rerun()
+            # Duplicate-guard payload hash
+            purchase_payload = {"bill": bill_no_in, "supplier": supplier_name, "rows": rows_in}
+            phash = _payload_hash(purchase_payload)
+            if st.session_state.get("last_saved_purchase_hash") == phash:
+                st.warning("This purchase bill looks already saved (duplicate ignored).")
             else:
-                st.warning("Nothing to save. Fill at least Product, Size and Qty > 0.")
+                def first_non_blank(items, key, fallback):
+                    for r in items:
+                        val = (r.get(key) or "").strip()
+                        if val:
+                            return val
+                    return fallback
+
+                unit_default = first_non_blank(rows_in, "unit", "box")
+                mat_default  = first_non_blank(rows_in, "material", "Tiles")
+
+                supplier_id = ensure_customer_by_name(supplier_name) if supplier_name else None
+                saved = 0
+                for ln in rows_in:
+                    name = (ln.get("product_name") or "").strip()
+                    size = (ln.get("size") or "").strip()
+                    if not name or not size:
+                        continue
+                    qty  = _to_float(ln.get("qty"))      # allow zero purchases too
+                    rate = _to_float(ln.get("rate"))
+                    unit = (ln.get("unit") or unit_default).strip() or "box"
+                    material = (ln.get("material") or mat_default).strip()
+                    if qty < 0:
+                        continue
+                    pid = ensure_product(name, size=size, unit=unit, material=material)
+                    note = f"Bill {bill_no_in}" if bill_no_in else None
+                    add_move("purchase", pid, qty, price_per_unit=(rate or None),
+                             customer_id=supplier_id, notes=(note or None))
+                    saved += 1
+
+                if saved:
+                    st.session_state["last_saved_purchase_hash"] = phash
+                    st.success(f"Saved {saved} purchase line(s).")
+                    # reset only the rows (avoid widget key-mutation error)
+                    st.session_state["rows_purchase"] = [
+                        {"material":"","size":"","product_name":"","unit":"","qty":"","rate":""} for _ in range(6)
+                    ]
+                    st.rerun()
+                else:
+                    st.warning("Nothing to save. Fill at least Product, Size and Qty (>= 0).")
         except Exception as e:
             st.error(f"Error: {e}")
 
@@ -523,47 +549,52 @@ with tabs[2]:
     cust_out_name = st.text_input("Customer Name (optional)", key="customer_out")
 
     rows_out, subtotal_out = row_form("rows_sale", "Items")
+
     if st.button("Save Sales Bill", key="save_sales_bill"):
         try:
-            def first_non_blank(items, key, fallback):
-                for r in items:
-                    val = (r.get(key) or "").strip()
-                    if val:
-                        return val
-                return fallback
-
-            unit_default = first_non_blank(rows_out, "unit", "pcs")
-            mat_default  = first_non_blank(rows_out, "material", "Tiles")
-            cust_id = ensure_customer_by_name(cust_out_name)
-
-            saved = 0
-            for ln in rows_out:
-                name = (ln.get("product_name") or "").strip()
-                size = (ln.get("size") or "").strip()
-                if not name or not size:
-                    continue
-                qty  = _to_float(ln.get("qty"))
-                rate = _to_float(ln.get("rate"))
-                unit = (ln.get("unit") or unit_default).strip()
-                material = (ln.get("material") or mat_default).strip()
-                if qty <= 0:
-                    continue
-                pid = ensure_product(name, size=size, unit=unit, material=material)
-                note = f"Bill {bill_no_out}" if bill_no_out else None
-                add_move("sale", pid, qty, price_per_unit=(rate or None),
-                         customer_id=cust_id, notes=(note or None))
-                saved += 1
-
-            if saved:
-                st.success(f"Saved {saved} sale line(s).")
-                st.session_state["rows_sale"] = [
-                    {"material":"","product_name":"","size":"","unit":"","qty":"","rate":""} for _ in range(6)
-                ]
-                for k in ["bill_no_out","customer_out"]:
-                    st.session_state[k] = ""
-                st.rerun()
+            sales_payload = {"bill": bill_no_out, "customer": cust_out_name, "rows": rows_out}
+            shash = _payload_hash(sales_payload)
+            if st.session_state.get("last_saved_sales_hash") == shash:
+                st.warning("This sales bill looks already saved (duplicate ignored).")
             else:
-                st.warning("Nothing to save. Fill at least Product, Size and Qty > 0.")
+                def first_non_blank(items, key, fallback):
+                    for r in items:
+                        val = (r.get(key) or "").strip()
+                        if val:
+                            return val
+                    return fallback
+
+                unit_default = first_non_blank(rows_out, "unit", "box")
+                mat_default  = first_non_blank(rows_out, "material", "Tiles")
+                cust_id = ensure_customer_by_name(cust_out_name)
+
+                saved = 0
+                for ln in rows_out:
+                    name = (ln.get("product_name") or "").strip()
+                    size = (ln.get("size") or "").strip()
+                    if not name or not size:
+                        continue
+                    qty  = _to_float(ln.get("qty"))
+                    rate = _to_float(ln.get("rate"))
+                    unit = (ln.get("unit") or unit_default).strip() or "box"
+                    material = (ln.get("material") or mat_default).strip()
+                    if qty <= 0:
+                        continue
+                    pid = ensure_product(name, size=size, unit=unit, material=material)
+                    note = f"Bill {bill_no_out}" if bill_no_out else None
+                    add_move("sale", pid, qty, price_per_unit=(rate or None),
+                             customer_id=cust_id, notes=(note or None))
+                    saved += 1
+
+                if saved:
+                    st.session_state["last_saved_sales_hash"] = shash
+                    st.success(f"Saved {saved} sale line(s).")
+                    st.session_state["rows_sale"] = [
+                        {"material":"","size":"","product_name":"","unit":"","qty":"","rate":""} for _ in range(6)
+                    ]
+                    st.rerun()
+                else:
+                    st.warning("Nothing to save. Fill at least Product, Size and Qty > 0.")
         except Exception as e:
             st.error(f"Error: {e}")
 
@@ -574,20 +605,27 @@ with tabs[3]:
     if prods:
         df = pd.DataFrame(prods)
         df["current_stock"] = df["id"].apply(product_stock)
+        # last party (supplier/customer) seen for this product
+        df["party"] = df["id"].apply(last_party_for_product)
         df["status"] = df["current_stock"].apply(lambda x: "NEGATIVE ⚠️" if x < 0 else "")
+
         low_thr = st.number_input("Low stock threshold (show items below this)", min_value=0.0, step=1.0, value=10.0)
-        view = df[["id","name","material","size","unit","current_stock","status"]].sort_values("name")
-        st.dataframe(view, use_container_width=True)
+
+        # Order by Size then Name
+        view = df[["party","name","material","size","unit","current_stock","status"]].copy()
+        view = view.sort_values(by=["size","name"], na_position="last")
+        st.dataframe(view.rename(columns={"party":"Party","name":"Product"}), use_container_width=True)
 
         low = df[df["current_stock"] < low_thr]
         st.markdown("#### ⚠️ Low Stock Items")
         if low.empty:
             st.success("All good. No low stock items.")
         else:
-            st.dataframe(low[["id","name","size","unit","current_stock"]], use_container_width=True)
+            lowv = low[["party","name","size","unit","current_stock"]].sort_values(by=["size","name"])
+            st.dataframe(lowv.rename(columns={"party":"Party","name":"Product"}), use_container_width=True)
 
         if st.button("Export Stock to CSV"):
-            out = df[["name","material","size","unit","current_stock"]].copy()
+            out = view.rename(columns={"party":"Party","name":"Product","current_stock":"Stock"})
             out.to_csv("stock_export.csv", index=False)
             st.success("Saved as stock_export.csv (in the same folder).")
     else:
@@ -604,21 +642,43 @@ with tabs[4]:
         rep["qty_display"] = rep.apply(lambda r: f'{abs(r["qty"])} {r["unit"]}', axis=1)
         rep["value"] = rep.apply(lambda r: (abs(r["qty"]) * (r["price_per_unit"] or 0.0)), axis=1)
 
+        # Sort by Size then Product Name
+        rep = rep.sort_values(by=["product_size","product_name","time"])
+
         st.markdown("#### All Movements Today")
-        show = rep[["time","kind","product_name","qty_display","customer_name","price_per_unit","value","notes"]]
+        show = rep[["time","kind","product_size","product_name","qty_display","customer_name","price_per_unit","value","notes"]]
         show = show.rename(columns={
-            "kind":"Type","product_name":"Product","customer_name":"Customer",
-            "price_per_unit":"Rate","value":"Amount","qty_display":"Qty"
+            "kind":"Type","product_size":"Size","product_name":"Product","customer_name":"Customer",
+            "price_per_unit":"Rate","value":"Amount","qty_display":"Qty","notes":"Bill/Notes"
         })
         st.dataframe(show, use_container_width=True)
 
-        sales = rep[rep["kind"]=="sale"].copy()
+        # Bill-wise totals (by notes)
+        st.markdown("#### Bill-wise Totals (Purchases)")
+        rep_p = rep[rep["kind"]=="purchase"].copy()
+        if rep_p.empty:
+            st.info("No purchases.")
+        else:
+            t1 = rep_p.groupby(rep_p["notes"].fillna("N/A"))["value"].sum().reset_index()
+            t1 = t1.rename(columns={"notes":"Bill/Notes","value":"Total Amount"}).sort_values("Bill/Notes")
+            st.dataframe(t1, use_container_width=True)
+
+        st.markdown("#### Bill-wise Totals (Sales)")
+        rep_s = rep[rep["kind"]=="sale"].copy()
+        if rep_s.empty:
+            st.info("No sales.")
+        else:
+            t2 = rep_s.groupby(rep_s["notes"].fillna("N/A"))["value"].sum().reset_index()
+            t2 = t2.rename(columns={"notes":"Bill/Notes","value":"Total Amount"}).sort_values("Bill/Notes")
+            st.dataframe(t2, use_container_width=True)
+
+        # Sales by Customer (kept)
+        sales = rep_s
         if not sales.empty:
             st.markdown("#### Who bought today (Sales by Customer)")
-            cust = sales.groupby("customer_name", dropna=False)["value"].sum().reset_index().rename(
+            cust = sales.groupby(sales["customer_name"].fillna("N/A"))["value"].sum().reset_index().rename(
                 columns={"customer_name":"Customer","value":"Total Amount"}
             )
-            cust["Customer"] = cust["Customer"].fillna("N/A")
             st.dataframe(cust, use_container_width=True)
 
         st.markdown("#### Stock Snapshot (End of Day)")
@@ -627,10 +687,11 @@ with tabs[4]:
         for p in prods:
             qty_left = product_stock(p["id"])
             snap.append({
-                "Product": p["name"], "Size": p["size"], "Unit": p["unit"],
+                "Size": p["size"], "Product": p["name"], "Unit": p["unit"],
                 "Stock Left": qty_left, "Status": "NEGATIVE ⚠️" if qty_left < 0 else ""
             })
-        st.dataframe(pd.DataFrame(snap).sort_values("Product"), use_container_width=True)
+        snap_df = pd.DataFrame(snap).sort_values(by=["Size","Product"])
+        st.dataframe(snap_df, use_container_width=True)
 
         if st.button(f"Export Today’s Report to CSV"):
             show.to_csv(f"report_{day.isoformat()}.csv", index=False)
