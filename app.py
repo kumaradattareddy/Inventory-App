@@ -173,7 +173,6 @@ def ensure_customer_by_name(name: str, phone: str = None, address: str = None):
     rows = run_query("SELECT * FROM customers WHERE lower(name)=?", (name.lower(),), fetch=True)
     return dict(rows[0])["id"]
 
-# --- Utility: parse numeric text (blank or invalid -> 0) ---
 def _to_float(txt: str) -> float:
     s = (txt or "").strip()
     if not s:
@@ -256,11 +255,15 @@ with tabs[0]:
 
     st.divider()
     st.subheader("Quick Add Customers (multiple)")
-    if "bulk_cust_rows" not in st.session_state:
-        st.session_state.bulk_cust_rows = [{"name":"","phone":"","address":""} for _ in range(5)]
-    dfc = pd.DataFrame(st.session_state.bulk_cust_rows)
-    data_bulk = st.data_editor(
-        dfc, use_container_width=True, num_rows="dynamic",
+    if "bulk_cust_df" not in st.session_state:
+        st.session_state.bulk_cust_df = pd.DataFrame(
+            [{"name":"","phone":"","address":""} for _ in range(5)]
+        )
+
+    edited_cust = st.data_editor(
+        st.session_state.bulk_cust_df,
+        use_container_width=True,
+        num_rows="dynamic",
         key="bulk_customers_editor",
         column_config={
             "name": st.column_config.TextColumn("Customer Name (required)"),
@@ -268,19 +271,19 @@ with tabs[0]:
             "address": st.column_config.TextColumn("Address")
         }
     )
-    st.session_state.bulk_cust_rows = pd.DataFrame(data_bulk).to_dict(orient="records")
+    st.session_state.bulk_cust_df = edited_cust
+
     if st.button("Save Customers"):
-        rows = pd.DataFrame(st.session_state.bulk_cust_rows)
         added = 0
-        for _, r in rows.iterrows():
-            nm = (str(r.get("name") or "").strip())
+        for _, r in st.session_state.bulk_cust_df.fillna("").iterrows():
+            nm = (r["name"] or "").strip()
             if not nm:
                 continue
-            add_customer(nm, str(r.get("phone") or "").strip(), str(r.get("address") or "").strip())
+            add_customer(nm, str(r["phone"] or "").strip(), str(r["address"] or "").strip())
             added += 1
         if added:
             st.success(f"Added {added} customer(s).")
-            st.session_state.bulk_cust_rows = [{"name":"","phone":"","address":""} for _ in range(5)]
+            st.session_state.bulk_cust_df = pd.DataFrame([{"name":"","phone":"","address":""} for _ in range(5)])
             st.rerun()
         else:
             st.info("Nothing to save. Enter at least one row with Customer Name.")
@@ -329,19 +332,19 @@ with tabs[1]:
     st.divider()
     st.markdown("### 🧾 Quick Bill Entry — Purchase (multiple items)")
 
-    if "qbe_purchase_rows" not in st.session_state:
-        st.session_state.qbe_purchase_rows = [
-            {"product_name":"", "size":"", "qty":"", "rate":"", "unit":"pcs", "material":"Tiles", "comments":""}
-            for _ in range(8)
-        ]
+    # keep one DataFrame in session
+    if "qbe_purchase_df" not in st.session_state:
+        st.session_state.qbe_purchase_df = pd.DataFrame(
+            [{"product_name":"","size":"","qty":"","rate":"","unit":"pcs","material":"Tiles","comments":""}
+             for _ in range(8)]
+        )
 
     bill_no_in = st.text_input("Bill / Invoice No. (optional)", key="bill_no_in")
     supplier_name = st.text_input("Supplier / Name (optional)", key="supplier_in")
 
-    # 1) Render editor with current state
-    df_p = pd.DataFrame(st.session_state.qbe_purchase_rows)
-    data_in = st.data_editor(
-        df_p,
+    # render editor with df from session
+    edited_in = st.data_editor(
+        st.session_state.qbe_purchase_df,
         use_container_width=True,
         num_rows="dynamic",
         key="bill_editor_in",
@@ -355,34 +358,24 @@ with tabs[1]:
             "comments": st.column_config.TextColumn("Comments")
         }
     )
+    # store edits back
+    st.session_state.qbe_purchase_df = edited_in.copy()
 
-    # 2) Normalize & auto-apply unit AFTER edit
-    data_in = pd.DataFrame(data_in).fillna("")
-    required_cols = ["product_name","size","qty","rate","unit","material","comments"]
-    for c in required_cols:
-        if c not in data_in.columns:
-            data_in[c] = ""
-    if len(data_in) > 0:
-        first_unit_in = (str(data_in.loc[0, "unit"]) or "pcs")
-        data_in["unit"] = first_unit_in
+    # auto-fill blank unit cells with first row unit (do not overwrite non-blank)
+    if len(st.session_state.qbe_purchase_df) > 0:
+        first_unit_in = str(st.session_state.qbe_purchase_df.iloc[0]["unit"] or "pcs")
+        mask_blank = st.session_state.qbe_purchase_df["unit"].astype(str).str.strip().eq("")
+        st.session_state.qbe_purchase_df.loc[mask_blank, "unit"] = first_unit_in
 
-    # 3) Persist back to session
-    st.session_state.qbe_purchase_rows = data_in.to_dict(orient="records")
-
-    # 4) Subtotal
-    try:
-        tmpi = data_in.copy()
-        tmpi["q"] = pd.to_numeric(tmpi["qty"], errors="coerce").fillna(0.0)
-        tmpi["r"] = pd.to_numeric(tmpi["rate"], errors="coerce").fillna(0.0)
-        subtotal_in = float((tmpi["q"] * tmpi["r"]).sum())
-    except Exception:
-        subtotal_in = 0.0
+    tmpi = st.session_state.qbe_purchase_df.copy()
+    tmpi["q"] = pd.to_numeric(tmpi["qty"], errors="coerce").fillna(0.0)
+    tmpi["r"] = pd.to_numeric(tmpi["rate"], errors="coerce").fillna(0.0)
+    subtotal_in = float((tmpi["q"] * tmpi["r"]).sum())
     st.markdown(f"**Bill Subtotal (Purchase):** ₹ {subtotal_in:,.2f}")
 
-    # 5) Save bill lines
     if st.button("Save Purchase Bill"):
         try:
-            lines = pd.DataFrame(st.session_state.qbe_purchase_rows).to_dict(orient="records")
+            lines = st.session_state.qbe_purchase_df.fillna("").to_dict(orient="records")
             supplier_id = ensure_customer_by_name(supplier_name) if supplier_name else None
             saved = 0
             for ln in lines:
@@ -405,10 +398,10 @@ with tabs[1]:
 
             if saved > 0:
                 st.success(f"Saved {saved} purchase line(s).")
-                st.session_state.qbe_purchase_rows = [
-                    {"product_name":"", "size":"","qty":"","rate":"","unit":"pcs","material":"Tiles","comments":""}
-                    for _ in range(8)
-                ]
+                st.session_state.qbe_purchase_df = pd.DataFrame(
+                    [{"product_name":"","size":"","qty":"","rate":"","unit":"pcs","material":"Tiles","comments":""}
+                     for _ in range(8)]
+                )
                 for k in ["bill_no_in","supplier_in"]:
                     st.session_state[k] = ""
                 st.rerun()
@@ -444,7 +437,6 @@ with tabs[2]:
 
         notes = st.text_input("Bill / Invoice No. or Notes", key="sale_notes", placeholder="Invoice no / payment mode / remarks")
 
-        # LIVE TOTAL PRICE
         line_total = _to_float(qty_text) * _to_float(price_text)
         st.markdown(f"<div class='amount'>Line Total: ₹ {line_total:,.2f}</div>", unsafe_allow_html=True)
 
@@ -470,19 +462,17 @@ with tabs[2]:
     st.divider()
     st.markdown("### 🧾 Quick Bill Entry — Sale (multiple items)")
 
-    if "qbe_sale_rows" not in st.session_state:
-        st.session_state.qbe_sale_rows = [
-            {"product_name":"", "size":"", "qty":"", "rate":"", "unit":"pcs", "material":"Tiles", "comments":""}
-            for _ in range(8)
-        ]
+    if "qbe_sale_df" not in st.session_state:
+        st.session_state.qbe_sale_df = pd.DataFrame(
+            [{"product_name":"","size":"","qty":"","rate":"","unit":"pcs","material":"Tiles","comments":""}
+             for _ in range(8)]
+        )
 
     bill_no_out = st.text_input("Bill / Invoice No. (optional)", key="bill_no_out")
     cust_out_name = st.text_input("Customer Name (optional)", key="customer_out")
 
-    # 1) Render editor with current state
-    df_edit = pd.DataFrame(st.session_state.qbe_sale_rows)
-    data_out = st.data_editor(
-        df_edit,
+    edited_out = st.data_editor(
+        st.session_state.qbe_sale_df,
         use_container_width=True,
         num_rows="dynamic",
         key="bill_editor_out",
@@ -496,34 +486,23 @@ with tabs[2]:
             "comments": st.column_config.TextColumn("Comments")
         }
     )
+    st.session_state.qbe_sale_df = edited_out.copy()
 
-    # 2) Normalize & auto-apply unit AFTER edit
-    data_out = pd.DataFrame(data_out).fillna("")
-    required_cols = ["product_name","size","qty","rate","unit","material","comments"]
-    for c in required_cols:
-        if c not in data_out.columns:
-            data_out[c] = ""
-    if len(data_out) > 0:
-        first_unit = (str(data_out.loc[0, "unit"]) or "pcs")
-        data_out["unit"] = first_unit
+    # fill blank units with first row unit only (don’t overwrite user-set values)
+    if len(st.session_state.qbe_sale_df) > 0:
+        first_unit = str(st.session_state.qbe_sale_df.iloc[0]["unit"] or "pcs")
+        mask_blank = st.session_state.qbe_sale_df["unit"].astype(str).str.strip().eq("")
+        st.session_state.qbe_sale_df.loc[mask_blank, "unit"] = first_unit
 
-    # 3) Persist back to session
-    st.session_state.qbe_sale_rows = data_out.to_dict(orient="records")
-
-    # 4) Subtotal
-    try:
-        tmp = data_out.copy()
-        tmp["q"] = pd.to_numeric(tmp["qty"], errors="coerce").fillna(0.0)
-        tmp["r"] = pd.to_numeric(tmp["rate"], errors="coerce").fillna(0.0)
-        subtotal = float((tmp["q"] * tmp["r"]).sum())
-    except Exception:
-        subtotal = 0.0
+    tmp = st.session_state.qbe_sale_df.copy()
+    tmp["q"] = pd.to_numeric(tmp["qty"], errors="coerce").fillna(0.0)
+    tmp["r"] = pd.to_numeric(tmp["rate"], errors="coerce").fillna(0.0)
+    subtotal = float((tmp["q"] * tmp["r"]).sum())
     st.markdown(f"**Bill Subtotal:** ₹ {subtotal:,.2f}")
 
-    # 5) Save bill lines
     if st.button("Save Sales Bill"):
         try:
-            lines = pd.DataFrame(st.session_state.qbe_sale_rows).to_dict(orient="records")
+            lines = st.session_state.qbe_sale_df.fillna("").to_dict(orient="records")
             cust_id = ensure_customer_by_name(cust_out_name)
             saved = 0
             for ln in lines:
@@ -546,10 +525,10 @@ with tabs[2]:
 
             if saved > 0:
                 st.success(f"Saved {saved} sale line(s).")
-                st.session_state.qbe_sale_rows = [
-                    {"product_name":"", "size":"","qty":"","rate":"","unit":"pcs","material":"Tiles","comments":""}
-                    for _ in range(8)
-                ]
+                st.session_state.qbe_sale_df = pd.DataFrame(
+                    [{"product_name":"","size":"","qty":"","rate":"","unit":"pcs","material":"Tiles","comments":""}
+                     for _ in range(8)]
+                )
                 for k in ["bill_no_out","customer_out"]:
                     st.session_state[k] = ""
                 st.rerun()
@@ -630,5 +609,5 @@ with tabs[4]:
         st.info("No entries on this day yet.")
 
 st.divider()
-st.caption("Tip: Quick Bill lets you enter many lines fast; products are created automatically using Product Name + Size + Unit. The unit you set in the first row auto-fills the rest (you can still edit any row).")
-st.caption("© 2023 Venkat Reddy. Inventory App for Tiles & Granites. Built with Streamlit.")
+st.caption("Tip: Quick Bill keeps your typing stable. Units auto-fill only for blank unit cells from the first row (you can still edit any row).")
+st.caption("© 2023 Venkat Reddy. Inventory App for Tiles & Granites. Licensed under MIT.")
