@@ -18,7 +18,7 @@ def _hash_password(password: str, salt: str) -> str:
     dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), 100_000)
     return dk.hex()
 
-def run_query(query: str, params=(), fetch=False):
+def run_query(query, params=(), fetch=False):
     with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
@@ -94,87 +94,122 @@ def init_db():
         )""")
         conn.commit()
 
-    # Ensure default user exists
     if not user_exists(DEFAULT_USERNAME):
         create_user(DEFAULT_USERNAME, DEFAULT_PASSWORD)
 
-
-# ---------- STREAMLIT APP ----------
-st.set_page_config(page_title="Inventory App", layout="wide")
-init_db()
-
-# Session state for login
-if "user" not in st.session_state:
-    st.session_state.user = None
-
-# --- LOGIN SCREEN ---
-if not st.session_state.user:
-    st.title("🔐 Login")
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-    if st.button("Login"):
-        user = verify_login(username, password)
-        if user:
-            st.session_state.user = user
-            st.success(f"Welcome, {user['username']} 👋")
-            st.rerun()
-        else:
-            st.error("Invalid login")
-
-else:
-    # --- MAIN APP ---
-    st.sidebar.success(f"Logged in as {st.session_state.user['username']}")
-    if st.sidebar.button("Logout"):
-        st.session_state.user = None
-        st.rerun()
-
+# ---------- APP ----------
+def main():
     st.title("📦 Inventory Management")
 
-    tab1, tab2, tab3 = st.tabs(["Products", "Customers", "Stock Moves"])
+    # --- LOGIN ---
+    if "user" not in st.session_state:
+        st.sidebar.header("🔐 Login")
+        with st.sidebar.form("login_form"):
+            username = st.text_input("Username", key="login_user")
+            password = st.text_input("Password", type="password", key="login_pass")
+            submit = st.form_submit_button("Login")
+        if submit:
+            user = verify_login(username, password)
+            if user:
+                st.session_state["user"] = user
+                st.success("✅ Logged in successfully!")
+                st.rerun()
+            else:
+                st.error("❌ Invalid login")
+        return
 
-    with tab1:
-        st.subheader("Products")
+    st.sidebar.success(f"Logged in as {st.session_state['user']['username']}")
+    page = st.sidebar.radio("Go to", ["Products", "Customers", "Stock Moves", "Reports"])
+
+    # --- PRODUCTS ---
+    if page == "Products":
+        st.header("📦 Manage Products")
+
+        with st.form("product_form", clear_on_submit=True):
+            name = st.text_input("Product Name", key="prod_name")
+            material = st.text_input("Material", key="prod_material")
+            size = st.text_input("Size", key="prod_size")
+            unit = st.text_input("Unit", key="prod_unit")
+            opening_stock = st.number_input("Opening Stock", min_value=0.0, step=0.1, key="prod_opening")
+            submitted = st.form_submit_button("➕ Add Product")
+
+        if submitted:
+            run_query("INSERT INTO products(name, material, size, unit, opening_stock) VALUES(?,?,?,?,?)",
+                      (name, material, size, unit, opening_stock))
+            st.success("✅ Product added!")
+
+        st.subheader("Existing Products")
         products = run_query("SELECT * FROM products", fetch=True)
-        st.dataframe(pd.DataFrame(products) if products else pd.DataFrame())
-        with st.form("add_product"):
-            name = st.text_input("Product Name")
-            material = st.text_input("Material")
-            size = st.text_input("Size")
-            unit = st.selectbox("Unit", ["pcs", "box", "sqft", "kg", "bag"])
-            opening = st.number_input("Opening Stock", min_value=0.0, step=1.0)
-            if st.form_submit_button("Add Product"):
-                run_query("INSERT INTO products(name, material, size, unit, opening_stock) VALUES (?,?,?,?,?)",
-                          (name, material, size, unit, opening))
-                st.success("Product added!")
-                st.rerun()
+        st.dataframe(pd.DataFrame(products))
 
-    with tab2:
-        st.subheader("Customers")
+    # --- CUSTOMERS ---
+    elif page == "Customers":
+        st.header("👥 Manage Customers")
+
+        with st.form("customer_form", clear_on_submit=True):
+            name = st.text_input("Customer Name", key="cust_name")
+            phone = st.text_input("Phone", key="cust_phone")
+            address = st.text_area("Address", key="cust_address")
+            submitted = st.form_submit_button("➕ Add Customer")
+
+        if submitted:
+            run_query("INSERT INTO customers(name, phone, address) VALUES(?,?,?)", (name, phone, address))
+            st.success("✅ Customer added!")
+
+        st.subheader("Existing Customers")
         customers = run_query("SELECT * FROM customers", fetch=True)
-        st.dataframe(pd.DataFrame(customers) if customers else pd.DataFrame())
-        with st.form("add_customer"):
-            cname = st.text_input("Customer Name")
-            phone = st.text_input("Phone")
-            addr = st.text_area("Address")
-            if st.form_submit_button("Add Customer"):
-                run_query("INSERT INTO customers(name, phone, address) VALUES (?,?,?)",
-                          (cname, phone, addr))
-                st.success("Customer added!")
-                st.rerun()
+        st.dataframe(pd.DataFrame(customers))
 
-    with tab3:
-        st.subheader("Stock Moves")
-        moves = run_query("SELECT * FROM stock_moves", fetch=True)
-        st.dataframe(pd.DataFrame(moves) if moves else pd.DataFrame())
-        with st.form("add_move"):
-            kind = st.selectbox("Move Type", ["IN", "OUT"])
-            prod_id = st.number_input("Product ID", min_value=1, step=1)
-            qty = st.number_input("Quantity", min_value=0.0, step=1.0)
-            price = st.number_input("Price per unit", min_value=0.0, step=1.0)
-            cust_id = st.number_input("Customer ID (optional)", min_value=0, step=1)
-            notes = st.text_area("Notes")
-            if st.form_submit_button("Add Move"):
-                run_query("INSERT INTO stock_moves(ts, kind, product_id, qty, price_per_unit, customer_id, notes) VALUES (?,?,?,?,?,?,?)",
-                          (datetime.now().isoformat(), kind, prod_id, qty, price, cust_id if cust_id > 0 else None, notes))
-                st.success("Move added!")
-                st.rerun()
+    # --- STOCK MOVES ---
+    elif page == "Stock Moves":
+        st.header("📦 Add Stock Movement")
+
+        with st.form("stock_move_form", clear_on_submit=True):
+            kind = st.selectbox("Kind", ["IN", "OUT"], key="move_kind")
+            product = st.selectbox(
+                "Product",
+                [f"{p['id']} - {p['name']}" for p in run_query("SELECT * FROM products", fetch=True)],
+                key="move_product"
+            )
+            qty = st.number_input("Quantity", min_value=0.0, step=0.1, key="move_qty")
+            unit_price = st.number_input("Price per unit", min_value=0.0, step=0.1, key="move_price")
+            customer = st.selectbox(
+                "Customer (optional)",
+                ["None"] + [f"{c['id']} - {c['name']}" for c in run_query("SELECT * FROM customers", fetch=True)],
+                key="move_customer"
+            )
+            notes = st.text_area("Notes", key="move_notes")
+
+            submitted = st.form_submit_button("💾 Save Movement")
+
+        if submitted:
+            product_id = int(product.split(" - ")[0])
+            cust_id = None if customer == "None" else int(customer.split(" - ")[0])
+            run_query("""
+                INSERT INTO stock_moves(ts, kind, product_id, qty, price_per_unit, customer_id, notes)
+                VALUES(?,?,?,?,?,?,?)
+            """, (datetime.now().isoformat(), kind, product_id, qty, unit_price, cust_id, notes))
+            st.success("✅ Stock movement saved!")
+
+        st.subheader("All Stock Movements")
+        moves = run_query("SELECT * FROM stock_moves ORDER BY ts DESC", fetch=True)
+        st.dataframe(pd.DataFrame(moves))
+
+    # --- REPORTS ---
+    elif page == "Reports":
+        st.header("📊 Reports")
+
+        stock = run_query("""
+            SELECT p.name, p.unit, p.opening_stock +
+                IFNULL((SELECT SUM(qty) FROM stock_moves WHERE product_id=p.id AND kind='IN'),0) -
+                IFNULL((SELECT SUM(qty) FROM stock_moves WHERE product_id=p.id AND kind='OUT'),0)
+                AS current_stock
+            FROM products p
+        """, fetch=True)
+        st.subheader("📦 Current Stock Levels")
+        st.dataframe(pd.DataFrame(stock))
+
+
+if __name__ == "__main__":
+    init_db()
+    main()
