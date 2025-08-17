@@ -181,7 +181,7 @@ def _to_float(txt: str) -> float:
     except:
         return 0.0
 
-# ---------- ROW FORM (improved & fixed) ----------
+# ---------- ROW FORM (improved & dropdowns, no delete) ----------
 def ensure_rows(session_key: str, start_rows: int = 6):
     if session_key not in st.session_state:
         st.session_state[session_key] = [
@@ -192,11 +192,16 @@ def ensure_rows(session_key: str, start_rows: int = 6):
 def _row_amount(qty_txt: str, rate_txt: str) -> float:
     return _to_float(qty_txt) * _to_float(rate_txt)
 
+# default choices for Unit and Material
+DEFAULT_UNIT_OPTIONS = ["pcs", "box", "sq_ft", "bag", "kg"]
+DEFAULT_MATERIAL_OPTIONS = ["Tiles", "Granite", "Marble", "Other"]
+
 def row_form(session_key: str, title: str):
     """
     Row editor:
     - inputs are wrapped in a form so typing doesn't rerun
-    - deletion is done via checkboxes processed on submit
+    - Unit & Material are selectboxes (still allow existing custom values)
+    - no per-row delete (simpler)
     - amounts/subtotal are recalculated on submit and shown
     """
     ensure_rows(session_key)
@@ -225,8 +230,8 @@ def row_form(session_key: str, title: str):
 
     # form to avoid reruns while typing
     with st.form(f"form_{session_key}", clear_on_submit=False):
-        # labels
-        lab = st.columns([2.0,1.3,0.9,1.0,1.0,1.3,2.0,1.0,0.5])
+        # labels row
+        lab = st.columns([2.0,1.3,0.9,1.0,1.0,1.3,2.0,1.0])
         lab[0].markdown("**Product Name**")
         lab[1].markdown("**Size (req)**")
         lab[2].markdown("**Qty**")
@@ -235,71 +240,86 @@ def row_form(session_key: str, title: str):
         lab[5].markdown("**Material**")
         lab[6].markdown("**Comments**")
         lab[7].markdown("**Amount**")
-        lab[8].markdown("**Del**")
 
         # per-row widgets
         for i, r in enumerate(rows):
-            cols = st.columns([2.0,1.3,0.9,1.0,1.0,1.3,2.0,1.0,0.5])
+            cols = st.columns([2.0,1.3,0.9,1.0,1.0,1.3,2.0,1.0])
+            # product
             with cols[0]:
-                st.text_input("", value=r["product_name"], key=f"{session_key}_name_{i}", placeholder="e.g., Renite")
+                st.text_input("", value=r.get("product_name",""), key=f"{session_key}_name_{i}", placeholder="e.g., Renite")
+            # size
             with cols[1]:
-                st.text_input("", value=r["size"], key=f"{session_key}_size_{i}", placeholder="e.g., 600x600")
+                st.text_input("", value=r.get("size",""), key=f"{session_key}_size_{i}", placeholder="e.g., 600x600")
+            # qty
             with cols[2]:
-                st.text_input("", value=r["qty"], key=f"{session_key}_qty_{i}", placeholder="")
+                st.text_input("", value=r.get("qty",""), key=f"{session_key}_qty_{i}", placeholder="")
+            # rate
             with cols[3]:
-                st.text_input("", value=r["rate"], key=f"{session_key}_rate_{i}", placeholder="")
+                st.text_input("", value=r.get("rate",""), key=f"{session_key}_rate_{i}", placeholder="")
+            # unit: show a selectbox with default options but keep current value selectable
+            unit_current = (r.get("unit") or "").strip()
+            unit_options = DEFAULT_UNIT_OPTIONS.copy()
+            if unit_current and unit_current not in unit_options:
+                unit_options = [unit_current] + unit_options
             with cols[4]:
-                st.text_input("", value=r["unit"], key=f"{session_key}_unit_{i}", placeholder="pcs/boxes/sq_ft/bags/kgs")
+                st.selectbox("", options=unit_options, index=unit_options.index(unit_current) if unit_current in unit_options else 0,
+                             key=f"{session_key}_unit_{i}")
+            # material: same approach
+            mat_current = (r.get("material") or "").strip()
+            mat_options = DEFAULT_MATERIAL_OPTIONS.copy()
+            if mat_current and mat_current not in mat_options:
+                mat_options = [mat_current] + mat_options
             with cols[5]:
-                st.text_input("", value=r["material"], key=f"{session_key}_mat_{i}", placeholder="Tiles/Granites/Marble/…")
+                st.selectbox("", options=mat_options, index=mat_options.index(mat_current) if mat_current in mat_options else 0,
+                             key=f"{session_key}_mat_{i}")
+            # comments
             with cols[6]:
-                st.text_input("", value=r["comments"], key=f"{session_key}_cmt_{i}", placeholder="")
-            # Show amount based on the latest widget values if available (after submit/rerun)
+                st.text_input("", value=r.get("comments",""), key=f"{session_key}_cmt_{i}", placeholder="")
+            # computed amount (uses widget-stored values if present)
             qty_widget_val = st.session_state.get(f"{session_key}_qty_{i}", r.get("qty",""))
             rate_widget_val = st.session_state.get(f"{session_key}_rate_{i}", r.get("rate",""))
             amt = _row_amount(qty_widget_val, rate_widget_val)
             with cols[7]:
                 st.markdown(f"<div style='padding-top:6px;font-weight:600'>₹ {amt:,.2f}</div>", unsafe_allow_html=True)
-            with cols[8]:
-                st.checkbox("", value=False, key=f"{session_key}_del_{i}")
 
         submitted = st.form_submit_button("Update Items")
 
         if submitted:
             new_rows = []
             subtotal = 0.0
+            # read back widget values and overwrite session rows
             for i, _r in enumerate(rows):
-                name = st.session_state.get(f"{session_key}_name_{i}", "")
-                size = st.session_state.get(f"{session_key}_size_{i}", "")
-                qty  = st.session_state.get(f"{session_key}_qty_{i}", "")
-                rate = st.session_state.get(f"{session_key}_rate_{i}", "")
-                unit = st.session_state.get(f"{session_key}_unit_{i}", "")
-                mat  = st.session_state.get(f"{session_key}_mat_{i}", "")
-                cmt  = st.session_state.get(f"{session_key}_cmt_{i}", "")
-                mark_del = st.session_state.get(f"{session_key}_del_{i}", False)
+                name = st.session_state.get(f"{session_key}_name_{i}", "").strip()
+                size = st.session_state.get(f"{session_key}_size_{i}", "").strip()
+                qty  = st.session_state.get(f"{session_key}_qty_{i}", "").strip()
+                rate = st.session_state.get(f"{session_key}_rate_{i}", "").strip()
+                unit = st.session_state.get(f"{session_key}_unit_{i}", "").strip()
+                mat  = st.session_state.get(f"{session_key}_mat_{i}", "").strip()
+                cmt  = st.session_state.get(f"{session_key}_cmt_{i}", "").strip()
 
-                if not mark_del:
-                    new_rows.append({
-                        "product_name": name,
-                        "size": size,
-                        "qty": qty,
-                        "rate": rate,
-                        "unit": unit,
-                        "material": mat,
-                        "comments": cmt
-                    })
+                new_rows.append({
+                    "product_name": name,
+                    "size": size,
+                    "qty": qty,
+                    "rate": rate,
+                    "unit": unit,
+                    "material": mat,
+                    "comments": cmt
+                })
 
                 subtotal += _to_float(qty) * _to_float(rate)
 
+            # persist
             st.session_state[session_key] = new_rows if new_rows else [
                 {"product_name":"","size":"","qty":"","rate":"","unit":"","material":"","comments":""}
                 for _ in range(6)
             ]
             st.session_state[subtotal_key] = subtotal
 
-            # Use st.rerun() (works across streamlit versions consistently in this app)
-            st.rerun()
+            # rerun to show updated amounts/subtotal in the UI
+            st.experimental_rerun()
 
+    # show last computed subtotal (updated after you click Update Items)
     st.markdown(f"**Subtotal:** ₹ {st.session_state[subtotal_key]:,.2f}")
     return st.session_state[session_key], st.session_state[subtotal_key]
 
