@@ -13,6 +13,7 @@ DEFAULT_USERNAME = "venkat reddy"    # must be in ALLOWED_USERS
 DEFAULT_PASSWORD = "1234"            # change after first login
 # ======================================================
 
+
 # ---------- AUTH ----------
 def _hash_password(password: str, salt: str) -> str:
     dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), 100_000)
@@ -42,7 +43,8 @@ def verify_login(username: str, password: str):
         return {"username": row["username"]}
     return None
 
-# ---------- DB SETUP ----------
+
+# ---------- DB ----------
 def init_db():
     with closing(sqlite3.connect(DB_PATH)) as conn:
         c = conn.cursor()
@@ -50,9 +52,9 @@ def init_db():
         CREATE TABLE IF NOT EXISTS products(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
-            material TEXT,                 -- Tiles / Granites / Marble / Sanitary / CP / MYK / Other
-            size TEXT,                     -- e.g., 2x2 ft, 600x600 mm
-            unit TEXT NOT NULL,            -- pcs / boxs / sq_ft / bags / kgs
+            material TEXT,
+            size TEXT,
+            unit TEXT NOT NULL,
             opening_stock REAL DEFAULT 0
         )""")
         c.execute("""
@@ -65,12 +67,12 @@ def init_db():
         c.execute("""
         CREATE TABLE IF NOT EXISTS stock_moves(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts TEXT NOT NULL,              -- ISO datetime
-            kind TEXT NOT NULL,            -- purchase / sale / adjust
+            ts TEXT NOT NULL,
+            kind TEXT NOT NULL,
             product_id INTEGER NOT NULL,
             qty REAL NOT NULL,
-            price_per_unit REAL,           -- optional
-            customer_id INTEGER,           -- for sales (or supplier for purchases)
+            price_per_unit REAL,
+            customer_id INTEGER,
             notes TEXT,
             FOREIGN KEY(product_id) REFERENCES products(id),
             FOREIGN KEY(customer_id) REFERENCES customers(id)
@@ -92,6 +94,7 @@ def run_query(sql, params=(), fetch=False):
         if fetch:
             return c.fetchall()
         conn.commit()
+
 
 # ---------- HELPERS ----------
 def list_products():
@@ -146,7 +149,6 @@ def moves_on_day(d: date):
     """, (start, end), fetch=True)
     return [dict(r) for r in rows]
 
-# --- Product/customer helpers for auto-create (name+size+unit) ---
 def get_product_by_name_size_unit(name: str, size: str, unit: str):
     rows = run_query(
         "SELECT * FROM products WHERE lower(name)=? AND lower(COALESCE(size,''))=? AND unit=?",
@@ -181,6 +183,7 @@ def _to_float(txt: str) -> float:
         return float(s)
     except:
         return 0.0
+
 
 # ---------- UI ----------
 st.set_page_config(page_title="Tiles & Granite Inventory", layout="wide")
@@ -228,6 +231,7 @@ with top_right:
         st.session_state.pop("user", None)
         st.rerun()
 
+
 # --------- TABS ----------
 tabs = st.tabs([
     "👥 Customers",
@@ -236,6 +240,7 @@ tabs = st.tabs([
     "📊 Stock & Low Stock",
     "🗓️ Daily Report"
 ])
+
 
 # ===================== Customers =====================
 with tabs[0]:
@@ -295,6 +300,7 @@ with tabs[0]:
     else:
         st.info("No customers yet.")
 
+
 # ===================== Purchase (IN) =====================
 with tabs[1]:
     st.subheader("Record Purchase (Stock In)")
@@ -332,15 +338,15 @@ with tabs[1]:
     st.markdown("### 🧾 Quick Bill Entry — Purchase (multiple items)")
 
     if "qbe_purchase_df" not in st.session_state:
+        # keep all editable columns as strings during editing (prevents dtype flips)
         st.session_state.qbe_purchase_df = pd.DataFrame(
-            [{"product_name":"","size":"","qty":"","rate":"","unit":"pcs","material":"Tiles","comments":""}
-             for _ in range(8)]
+            [{"product_name":"","size":"","qty":"","rate":"","unit":"","material":"","comments":""}
+             for _ in range(8)], dtype="string"
         )
 
     bill_no_in = st.text_input("Bill / Invoice No. (optional)", key="bill_no_in")
     supplier_name = st.text_input("Supplier / Name (optional)", key="supplier_in")
 
-    # Editor bound to a single DF in session (we never mutate it inside same run)
     edited_in = st.data_editor(
         st.session_state.qbe_purchase_df,
         use_container_width=True,
@@ -351,36 +357,41 @@ with tabs[1]:
             "size": st.column_config.TextColumn("Size (required)"),
             "qty": st.column_config.TextColumn("Qty"),
             "rate": st.column_config.TextColumn("Rate"),
-            "unit": st.column_config.SelectboxColumn("Unit", options=["pcs","boxs","sq_ft","bags","kgs"], default="pcs"),
-            "material": st.column_config.SelectboxColumn("Material", options=["Tiles","Granites","Marble","Sanitary","CP","MYK","Other"], default="Tiles"),
+            # keep as TextColumn to avoid selectbox re-renders during typing
+            "unit": st.column_config.TextColumn("Unit (pcs/boxs/sq_ft/bags/kgs)"),
+            "material": st.column_config.TextColumn("Material (Tiles/Granites/Marble/Sanitary/CP/MYK)"),
             "comments": st.column_config.TextColumn("Comments")
         }
     )
-    # Store user edits back; do not auto-modify it
-    st.session_state.qbe_purchase_df = edited_in.copy()
+    st.session_state.qbe_purchase_df = edited_in.astype("string")
 
-    # For display math only: work on a copy and fill blank units from first row
+    # display-only subtotal from a copy
     calc_in = st.session_state.qbe_purchase_df.copy()
-    if len(calc_in) > 0:
-        first_unit_in = str(calc_in.iloc[0]["unit"] or "pcs")
-        calc_in["unit"] = calc_in["unit"].astype(str).fillna("").replace("", first_unit_in)
-
-    tmpi = calc_in.copy()
-    tmpi["q"] = pd.to_numeric(tmpi["qty"], errors="coerce").fillna(0.0)
-    tmpi["r"] = pd.to_numeric(tmpi["rate"], errors="coerce").fillna(0.0)
-    subtotal_in = float((tmpi["q"] * tmpi["r"]).sum())
+    calc_in["q"] = pd.to_numeric(calc_in["qty"], errors="coerce").fillna(0.0)
+    calc_in["r"] = pd.to_numeric(calc_in["rate"], errors="coerce").fillna(0.0)
+    subtotal_in = float((calc_in["q"] * calc_in["r"]).sum())
     st.markdown(f"**Bill Subtotal (Purchase):** ₹ {subtotal_in:,.2f}")
 
     if st.button("Save Purchase Bill"):
         try:
-            # Apply unit defaults at save time (still not touching widget df)
-            save_in = st.session_state.qbe_purchase_df.copy().fillna("")
-            if len(save_in) > 0:
-                first_unit_in = str(save_in.iloc[0].get("unit") or "pcs")
-                save_in["unit"] = save_in["unit"].astype(str).replace("", first_unit_in)
-            lines = save_in.to_dict(orient="records")
+            save_in = st.session_state.qbe_purchase_df.fillna("").astype(str).copy()
 
+            # sensible defaults at SAVE time only
+            def _first_non_blank(series, fallback):
+                for v in series:
+                    s = (str(v or "")).strip()
+                    if s:
+                        return s
+                return fallback
+
+            unit_default = _first_non_blank(save_in["unit"], "pcs")
+            mat_default = _first_non_blank(save_in["material"], "Tiles")
+            save_in.loc[save_in["unit"].str.strip() == "", "unit"] = unit_default
+            save_in.loc[save_in["material"].str.strip() == "", "material"] = mat_default
+
+            lines = save_in.to_dict(orient="records")
             supplier_id = ensure_customer_by_name(supplier_name) if supplier_name else None
+
             saved = 0
             for ln in lines:
                 name = (ln.get("product_name") or "").strip()
@@ -403,8 +414,8 @@ with tabs[1]:
             if saved > 0:
                 st.success(f"Saved {saved} purchase line(s).")
                 st.session_state.qbe_purchase_df = pd.DataFrame(
-                    [{"product_name":"","size":"","qty":"","rate":"","unit":"pcs","material":"Tiles","comments":""}
-                     for _ in range(8)]
+                    [{"product_name":"","size":"","qty":"","rate":"","unit":"","material":"","comments":""}
+                     for _ in range(8)], dtype="string"
                 )
                 for k in ["bill_no_in","supplier_in"]:
                     st.session_state[k] = ""
@@ -412,9 +423,10 @@ with tabs[1]:
             else:
                 st.warning("Nothing to save. Enter at least one row with Product Name, Size and Qty > 0.")
         except Exception as e:
-            st.error(f"Could not save bill: {e}")
+            st.error(f"Could not save purchase bill: {e}")
 
-# ===================== Sale (OUT) – Revamped =====================
+
+# ===================== Sale (OUT) =====================
 with tabs[2]:
     st.subheader("Record Sale (Stock Out)")
     prods = list_products()
@@ -468,8 +480,8 @@ with tabs[2]:
 
     if "qbe_sale_df" not in st.session_state:
         st.session_state.qbe_sale_df = pd.DataFrame(
-            [{"product_name":"","size":"","qty":"","rate":"","unit":"pcs","material":"Tiles","comments":""}
-             for _ in range(8)]
+            [{"product_name":"","size":"","qty":"","rate":"","unit":"","material":"","comments":""}
+             for _ in range(8)], dtype="string"
         )
 
     bill_no_out = st.text_input("Bill / Invoice No. (optional)", key="bill_no_out")
@@ -485,35 +497,41 @@ with tabs[2]:
             "size": st.column_config.TextColumn("Size (required)"),
             "qty": st.column_config.TextColumn("Qty"),
             "rate": st.column_config.TextColumn("Rate"),
-            "unit": st.column_config.SelectboxColumn("Unit", options=["pcs","boxs","sq_ft","bags","kgs"], default="pcs"),
-            "material": st.column_config.SelectboxColumn("Material", options=["Tiles","Granites","Marble","Sanitary","CP","MYK","Other"], default="Tiles"),
+            # text columns to avoid selectbox redraw quirks while typing
+            "unit": st.column_config.TextColumn("Unit (pcs/boxs/sq_ft/bags/kgs)"),
+            "material": st.column_config.TextColumn("Material (Tiles/Granites/Marble/Sanitary/CP/MYK)"),
             "comments": st.column_config.TextColumn("Comments")
         }
     )
-    st.session_state.qbe_sale_df = edited_out.copy()
+    st.session_state.qbe_sale_df = edited_out.astype("string")
 
-    # For display: copy and fill blank units from first row (do NOT mutate widget DF)
+    # display-only subtotal from a copy
     calc_out = st.session_state.qbe_sale_df.copy()
-    if len(calc_out) > 0:
-        first_unit = str(calc_out.iloc[0]["unit"] or "pcs")
-        calc_out["unit"] = calc_out["unit"].astype(str).fillna("").replace("", first_unit)
-
-    tmp = calc_out.copy()
-    tmp["q"] = pd.to_numeric(tmp["qty"], errors="coerce").fillna(0.0)
-    tmp["r"] = pd.to_numeric(tmp["rate"], errors="coerce").fillna(0.0)
-    subtotal = float((tmp["q"] * tmp["r"]).sum())
+    calc_out["q"] = pd.to_numeric(calc_out["qty"], errors="coerce").fillna(0.0)
+    calc_out["r"] = pd.to_numeric(calc_out["rate"], errors="coerce").fillna(0.0)
+    subtotal = float((calc_out["q"] * calc_out["r"]).sum())
     st.markdown(f"**Bill Subtotal:** ₹ {subtotal:,.2f}")
 
     if st.button("Save Sales Bill"):
         try:
-            # Apply unit defaults at save time only
-            save_out = st.session_state.qbe_sale_df.copy().fillna("")
-            if len(save_out) > 0:
-                first_unit = str(save_out.iloc[0].get("unit") or "pcs")
-                save_out["unit"] = save_out["unit"].astype(str).replace("", first_unit)
-            lines = save_out.to_dict(orient="records")
+            save_out = st.session_state.qbe_sale_df.fillna("").astype(str).copy()
 
+            # defaults at SAVE time only (no in-edit mutations)
+            def _first_non_blank(series, fallback):
+                for v in series:
+                    s = (str(v or "")).strip()
+                    if s:
+                        return s
+                return fallback
+
+            unit_default = _first_non_blank(save_out["unit"], "pcs")
+            mat_default = _first_non_blank(save_out["material"], "Tiles")
+            save_out.loc[save_out["unit"].str.strip() == "", "unit"] = unit_default
+            save_out.loc[save_out["material"].str.strip() == "", "material"] = mat_default
+
+            lines = save_out.to_dict(orient="records")
             cust_id = ensure_customer_by_name(cust_out_name)
+
             saved = 0
             for ln in lines:
                 name = (ln.get("product_name") or "").strip()
@@ -536,8 +554,8 @@ with tabs[2]:
             if saved > 0:
                 st.success(f"Saved {saved} sale line(s).")
                 st.session_state.qbe_sale_df = pd.DataFrame(
-                    [{"product_name":"","size":"","qty":"","rate":"","unit":"pcs","material":"Tiles","comments":""}
-                     for _ in range(8)]
+                    [{"product_name":"","size":"","qty":"","rate":"","unit":"","material":"","comments":""}
+                     for _ in range(8)], dtype="string"
                 )
                 for k in ["bill_no_out","customer_out"]:
                     st.session_state[k] = ""
@@ -546,6 +564,7 @@ with tabs[2]:
                 st.warning("Nothing to save. Enter at least one row with Product Name, Size and Qty > 0.")
         except Exception as e:
             st.error(f"Could not save bill: {e}")
+
 
 # ===================== Stock & Low Stock =====================
 with tabs[3]:
@@ -619,5 +638,4 @@ with tabs[4]:
         st.info("No entries on this day yet.")
 
 st.divider()
-st.caption("Tip: Quick Bill uses copies for totals and only applies unit defaults at save time, so your typing never gets overwritten.")
-st.caption("© 2023 Venkat Reddy. Inventory App for Tiles & Granites.")
+st.caption("Tip: In Quick Bill, cells never get changed while you type. Defaults for Unit/Material apply only when you save.")
