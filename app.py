@@ -3,8 +3,51 @@ from contextlib import closing
 from datetime import date, datetime
 import pandas as pd
 import streamlit as st
+import hashlib, secrets
 
 DB_PATH = "inventory.db"
+
+# ======= SINGLE-USER CONFIG =======
+ALLOWED_USERS = {"grandpa"}          # <- only these usernames can login
+DEFAULT_USERNAME = "grandpa"         # <- created automatically if missing
+DEFAULT_PASSWORD = "1234"            # <- change this before giving it to him
+# ==================================
+
+# ---------- AUTH ----------
+def _hash_password(password: str, salt: str) -> str:
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), 100_000)
+    return dk.hex()
+
+def user_exists(username: str) -> bool:
+    rows = run_query("SELECT 1 FROM users WHERE username=?", (username.strip().lower(),), fetch=True)
+    return bool(rows)
+
+def create_user(username: str, password: str):
+    username = username.strip().lower()
+    salt = secrets.token_hex(16)
+    pwd_hash = _hash_password(password, salt)
+    run_query(
+        "INSERT INTO users(username, password_hash, salt) VALUES(?,?,?)",
+        (username, pwd_hash, salt)
+    )
+
+def verify_login(username: str, password: str):
+    username = username.strip().lower()
+    # enforce allowlist first
+    if username not in ALLOWED_USERS:
+        return None
+    row = run_query("SELECT username, password_hash, salt FROM users WHERE username=?", (username,), fetch=True)
+    if not row:
+        return None
+    row = dict(row[0])
+    if _hash_password(password, row["salt"]) == row["password_hash"]:
+        return {"username": row["username"]}
+    return None
+
+def change_password(username: str, new_password: str):
+    salt = secrets.token_hex(16)
+    pwd_hash = _hash_password(new_password, salt)
+    run_query("UPDATE users SET password_hash=?, salt=? WHERE username=?", (pwd_hash, salt, username.strip().lower()))
 
 # ---------- DB SETUP ----------
 def init_db():
