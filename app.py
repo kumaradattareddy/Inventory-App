@@ -1,14 +1,13 @@
-import os
-import sqlite3
-from contextlib import closing
-from datetime import date, datetime, timedelta
-import pandas as pd
 import streamlit as st
+import pandas as pd
 import hashlib, secrets
+from contextlib import suppress
+from datetime import date, datetime, timedelta
 
-# ===================== Paths / DB file =====================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH  = os.path.join(BASE_DIR, "inventory.db")
+from sheets_db import ensure_all_tabs, fetch_df, append_row
+
+# ===================== APP CONFIG =====================
+st.set_page_config(page_title="Tiles & Granite Inventory", layout="wide")
 
 # ======= SINGLE-USER CONFIG (must be lowercase) =======
 ALLOWED_USERS = {"venkat reddy"}
@@ -16,197 +15,229 @@ DEFAULT_USERNAME = "venkat reddy"
 DEFAULT_PASSWORD = "1234"
 # ======================================================
 
+# ---------- BOOTSTRAP SHEETS (tabs + headers) ----------
+ensure_all_tabs()
+
 # ---------- AUTH ----------
 def _hash_password(password: str, salt: str) -> str:
     dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), 100_000)
     return dk.hex()
 
+def _users_df():
+    return fetch_df("Users")
+
 def user_exists(username: str) -> bool:
-    rows = run_query("SELECT 1 FROM users WHERE username=?", (username.strip().lower(),), fetch=True)
-    return bool(rows)
+    df = _users_df()
+    return (not df.empty) and username.strip().lower() in df["username"].str.lower().values
+
+def _new_id(df: pd.DataFrame) -> int:
+    if df.empty or "id" not in df.columns:
+        return 1
+    m = pd.to_numeric(df["id"], errors="coerce").fillna(0).astype(int).max()
+    return int(m) + 1
 
 def create_user(username: str, password: str):
-    username = username.strip().lower()
+    df = _users_df()
+    new_id = _new_id(df)
     salt = secrets.token_hex(16)
     pwd_hash = _hash_password(password, salt)
-    run_query("INSERT INTO users(username, password_hash, salt) VALUES(?,?,?)",
-              (username, pwd_hash, salt))
+    append_row("Users", [new_id, username.strip().lower(), pwd_hash, salt])
 
 def verify_login(username: str, password: str):
     username = username.strip().lower()
     if username not in ALLOWED_USERS:
         return None
-    row = run_query("SELECT username, password_hash, salt FROM users WHERE username=?",
-                    (username,), fetch=True)
-    if not row:
+    df = _users_df()
+    if df.empty:  # no users yet
         return None
-    row = dict(row[0])
+    row = df[df["username"].str.lower() == username]
+    if row.empty:
+        return None
+    row = row.iloc[0]
     if _hash_password(password, row["salt"]) == row["password_hash"]:
         return {"username": row["username"]}
     return None
 
-# ---------- DB ----------
-def init_db():
-    with closing(sqlite3.connect(DB_PATH)) as conn:
-        c = conn.cursor()
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS products(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            material TEXT,
-            size TEXT,
-            unit TEXT NOT NULL,
-            opening_stock REAL DEFAULT 0
-        )""")
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS customers(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            phone TEXT,
-            address TEXT
-        )""")
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS stock_moves(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            product_id INTEGER NOT NULL,
-            qty REAL NOT NULL,
-            price_per_unit REAL,
-            customer_id INTEGER,
-            notes TEXT,
-            FOREIGN KEY(product_id) REFERENCES products(id),
-            FOREIGN KEY(customer_id) REFERENCES customers(id)
-        )""")
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS users(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            salt TEXT NOT NULL
-        )""")
-        conn.commit()
+# ---------- DATA HELPERS (Sheets, read-all + append) ----------
+def products_df() -> pd.DataFrame:
+    df = fetch_df("Products")
+    if not df.empty:
+        # normalize types
+        with suppress(Exception):
+            df["opening_stock"] = pd.to_numeric(df["opening_stock"], errors="coerce").fillna(0.0)
+        with suppress(Exception):
+            df["id"] = pd.to_numeric(df["id"], errors="coerce").astype("Int64")
+    return df
 
-def run_query(sql, params=(), fetch=False):
-    with closing(sqlite3.connect(DB_PATH)) as conn:
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-        c.execute(sql, params)
-        if fetch:
-            return c.fetchall()
-        conn.commit()
+def customers_df() -> pd.DataFrame:
+    df = fetch_df("Customers")
+    if not df.empty:
+        with suppress(Exception):
+            df["id"] = pd.to_numeric(df["id"], errors="coerce").astype("Int64")
+    return df
 
-# ---------- HELPERS ----------
+def stock_moves_df() -> pd.DataFrame:
+    df = fetch_df("StockMoves")
+    if not df.empty:
+        for col in ["id", "product_id", "customer_id"]:
+            with suppress(Exception):
+                df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+        with suppress(Exception):
+            df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0.0)
+        with suppress(Exception):
+            df["price_per_unit"] = pd.to_numeric(df["price_per_unit"], errors="coerce").fillna(0.0)
+    return df
+
 def list_products():
-    rows = run_query("SELECT * FROM products ORDER BY name", fetch=True)
-    return [dict(r) for r in rows]
+    df = products_df()
+    if df.empty:
+        return []
+    return df.sort_values(["name"], na_position="last").to_dict(orient="records")
 
 def list_customers():
-    rows = run_query("SELECT * FROM customers ORDER BY name", fetch=True)
-    return [dict(r) for r in rows]
-
-def product_stock(product_id):
-    row = run_query("SELECT opening_stock FROM products WHERE id=?", (product_id,), fetch=True)
-    if not row:
-        return 0.0
-    opening = row[0]["opening_stock"] or 0.0
-    moves = run_query("SELECT COALESCE(SUM(qty),0) AS s FROM stock_moves WHERE product_id=?",
-                      (product_id,), fetch=True)
-    return float(opening) + float(moves[0]["s"])
+    df = customers_df()
+    if df.empty:
+        return []
+    return df.sort_values(["name"], na_position="last").to_dict(orient="records")
 
 def add_product(name, material, size, unit, opening_stock):
-    run_query(
-        "INSERT INTO products(name,material,size,unit,opening_stock) VALUES(?,?,?,?,?)",
-        (name.strip(), material.strip() if material else None,
-         size.strip() if size else None, unit, opening_stock)
-    )
+    df = products_df()
+    new_id = _new_id(df)
+    append_row("Products", [new_id, name.strip(), (material or "").strip() or None,
+                            (size or "").strip() or None, unit, float(opening_stock or 0.0)])
 
 def add_customer(name, phone, address):
-    run_query(
-        "INSERT INTO customers(name,phone,address) VALUES(?,?,?)",
-        (name.strip(), phone.strip() if phone else None, address.strip() if address else None)
-    )
-
-def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, notes=None,
-             when: datetime | None = None, dedupe_window_seconds: int = 120) -> bool:
-    """
-    Insert a stock move. Returns True if inserted, False if skipped as duplicate.
-    Dedupes identical moves within the last `dedupe_window_seconds`.
-    """
-    ts_dt = (when or datetime.now())
-    ins_qty = -qty if (kind == "sale" and qty > 0) else qty
-
-    if dedupe_window_seconds and dedupe_window_seconds > 0:
-        since = (ts_dt - timedelta(seconds=dedupe_window_seconds)).isoformat(timespec="seconds")
-        dup = run_query("""
-            SELECT 1 FROM stock_moves
-            WHERE kind=? AND product_id=? AND qty=?
-              AND COALESCE(price_per_unit,0)=COALESCE(?,0)
-              AND COALESCE(customer_id,-1)=COALESCE(?, -1)
-              AND COALESCE(notes,'')=COALESCE(?, '')
-              AND ts >= ?
-            LIMIT 1
-        """, (kind, product_id, ins_qty, price_per_unit, customer_id, notes or "", since), fetch=True)
-        if dup:
-            return False
-
-    ts = ts_dt.isoformat(timespec="seconds")
-    run_query(
-        "INSERT INTO stock_moves(ts,kind,product_id,qty,price_per_unit,customer_id,notes) VALUES(?,?,?,?,?,?,?)",
-        (ts, kind, product_id, ins_qty, price_per_unit, customer_id, notes)
-    )
-    return True
-
-def moves_on_day(d: date):
-    start = datetime(d.year, d.month, d.day, 0, 0, 0).isoformat(timespec="seconds")
-    end   = datetime(d.year, d.month, d.day, 23, 59, 59).isoformat(timespec="seconds")
-    rows = run_query("""
-        SELECT m.*, p.name AS product_name, p.size AS product_size, p.unit, c.name AS customer_name
-        FROM stock_moves m
-        JOIN products p ON p.id = m.product_id
-        LEFT JOIN customers c ON c.id = m.customer_id
-        WHERE m.ts BETWEEN ? AND ?
-        ORDER BY m.ts
-    """, (start, end), fetch=True)
-    return [dict(r) for r in rows]
+    df = customers_df()
+    new_id = _new_id(df)
+    append_row("Customers", [new_id, name.strip(),
+                             (phone or "").strip() or None,
+                             (address or "").strip() or None])
 
 def get_product_by_name_size_unit(name: str, size: str, unit: str):
-    rows = run_query(
-        "SELECT * FROM products WHERE lower(name)=? AND lower(COALESCE(size,''))=? AND unit=?",
-        (name.strip().lower(), (size or "").strip().lower(), unit), fetch=True
-    )
-    return dict(rows[0]) if rows else None
+    df = products_df()
+    if df.empty:
+        return None
+    name = (name or "").strip().lower()
+    size = (size or "").strip().lower()
+    unit = (unit or "").strip()
+    got = df[(df["name"].str.lower() == name) &
+             (df["unit"] == unit) &
+             (df["size"].fillna("").str.lower() == size)]
+    return None if got.empty else got.iloc[0].to_dict()
 
 def ensure_product(name: str, size: str, unit: str, material: str = None, opening_stock: float = 0.0):
     p = get_product_by_name_size_unit(name, size, unit)
     if p:
-        return p["id"]
+        return int(p["id"])
     add_product(name=name, material=material, size=size, unit=unit, opening_stock=opening_stock)
     p = get_product_by_name_size_unit(name, size, unit)
-    return p["id"]
+    return int(p["id"]) if p else None
 
 def ensure_customer_by_name(name: str, phone: str = None, address: str = None):
     name = (name or "").strip()
     if not name:
         return None
-    rows = run_query("SELECT * FROM customers WHERE lower(name)=?", (name.lower(),), fetch=True)
-    if rows:
-        return dict(rows[0])["id"]
+    df = customers_df()
+    if not df.empty:
+        got = df[df["name"].str.lower() == name.lower()]
+        if not got.empty:
+            return int(got.iloc[0]["id"])
     add_customer(name, phone, address)
-    rows = run_query("SELECT * FROM customers WHERE lower(name)=?", (name.lower(),), fetch=True)
-    return dict(rows[0])["id"]
+    df2 = customers_df()
+    got2 = df2[df2["name"].str.lower() == name.lower()]
+    return int(got2.iloc[0]["id"]) if not got2.empty else None
+
+def product_stock(product_id: int) -> float:
+    prods = products_df()
+    openings = 0.0
+    if not prods.empty:
+        row = prods[prods["id"] == product_id]
+        if not row.empty:
+            openings = float(row.iloc[0].get("opening_stock", 0.0) or 0.0)
+    moves = stock_moves_df()
+    if moves.empty:
+        return openings
+    s = moves[moves["product_id"] == product_id]["qty"].sum()
+    return float(openings + (s if pd.notna(s) else 0.0))
+
+def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, notes=None,
+             when: datetime | None = None, dedupe_window_seconds: int = 120) -> bool:
+    """
+    Append a stock move into Google Sheets, with duplicate guard.
+    - kind: "purchase" or "sale"
+    - qty: positive for purchase; positive sale will be stored as negative automatically
+    """
+    ts_dt = (when or datetime.now())
+    ins_qty = -qty if (kind == "sale" and qty > 0) else qty
+
+    # dedupe: check identical lines in recent window
+    if dedupe_window_seconds and dedupe_window_seconds > 0:
+        since = ts_dt - timedelta(seconds=dedupe_window_seconds)
+        df = stock_moves_df()
+        if not df.empty:
+            with suppress(Exception):
+                df["ts_dt"] = pd.to_datetime(df["ts"], errors="coerce")
+            recent = df[df["ts_dt"] >= since]
+            same = recent[
+                (recent["kind"] == kind) &
+                (recent["product_id"] == int(product_id)) &
+                (pd.to_numeric(recent["qty"], errors="coerce").fillna(0.0) == float(ins_qty)) &
+                (pd.to_numeric(recent["price_per_unit"], errors="coerce").fillna(0.0) == float(price_per_unit or 0.0)) &
+                (recent["customer_id"].fillna(-1).astype("Int64") == (int(customer_id) if customer_id else pd.NA)) &
+                (recent["notes"].fillna("") == (notes or ""))
+            ]
+            if not same.empty:
+                return False
+
+    df = stock_moves_df()
+    new_id = _new_id(df)
+    ts = ts_dt.isoformat(timespec="seconds")
+    append_row("StockMoves", [new_id, ts, kind, int(product_id), float(ins_qty),
+                              (None if price_per_unit in (None, "") else float(price_per_unit)),
+                              (None if customer_id in (None, "") else int(customer_id)),
+                              (None if not notes else str(notes))])
+    return True
+
+def moves_on_day(d: date):
+    start = datetime(d.year, d.month, d.day, 0, 0, 0)
+    end   = datetime(d.year, d.month, d.day, 23, 59, 59)
+
+    m = stock_moves_df()
+    if m.empty:
+        return []
+
+    with suppress(Exception):
+        m["ts_dt"] = pd.to_datetime(m["ts"], errors="coerce")
+    m = m[(m["ts_dt"] >= start) & (m["ts_dt"] <= end)]
+
+    if m.empty:
+        return []
+
+    p = products_df()
+    c = customers_df()
+
+    # Join product name/size/unit
+    m = m.merge(p[["id", "name", "size", "unit"]].rename(columns={
+        "id": "product_id", "name": "product_name", "size": "product_size"
+    }), on="product_id", how="left")
+
+    # Join customer name
+    if not c.empty:
+        m = m.merge(c[["id", "name"]].rename(columns={"id":"customer_id", "name":"customer_name"}),
+                    on="customer_id", how="left")
+
+    m = m.sort_values("ts_dt")
+    return m.to_dict(orient="records")
 
 def _to_float(txt: str) -> float:
     s = (txt or "").strip()
     if not s:
         return 0.0
-    try:
+    with suppress(Exception):
         return float(s)
-    except:
-        return 0.0
+    return 0.0
 
-# ---------- ROW FORM ----------
-# Default unit first = "box"
+# ---------- ROW FORM (your original UI) ----------
 DEFAULT_UNIT_OPTIONS = ["box", "pcs", "sq_ft", "bag", "kg"]
 DEFAULT_MATERIAL_OPTIONS = ["Tiles", "Granite", "Marble", "Other"]
 
@@ -223,9 +254,6 @@ def _row_amount(qty_txt: str, rate_txt: str) -> float:
         return 0.0
 
 def row_form(session_key: str, title: str):
-    """
-    Fields: Material, Size, Product Name, Unit, Qty, Rate, Amount.
-    """
     ensure_rows(session_key)
     rows = st.session_state[session_key]
 
@@ -261,7 +289,6 @@ def row_form(session_key: str, title: str):
         for i, r in enumerate(rows):
             cols = st.columns([1.1, 1.1, 2, 0.9, 0.8, 0.9, 1.1])
 
-            # 1. Material
             mat_current = (r.get("material") or "").strip()
             mat_options = DEFAULT_MATERIAL_OPTIONS.copy()
             if mat_current and mat_current not in mat_options:
@@ -271,15 +298,12 @@ def row_form(session_key: str, title: str):
                              index=mat_options.index(mat_current) if mat_current in mat_options else 0,
                              key=f"{session_key}_mat_{i}")
 
-            # 2. Size
             with cols[1]:
                 st.text_input("", value=r.get("size",""), key=f"{session_key}_size_{i}", placeholder="e.g., 600x600")
 
-            # 3. Product Name
             with cols[2]:
                 st.text_input("", value=r.get("product_name",""), key=f"{session_key}_name_{i}", placeholder="e.g., Renite")
 
-            # 4. Unit
             unit_current = (r.get("unit") or "").strip()
             unit_options = DEFAULT_UNIT_OPTIONS.copy()
             if unit_current and unit_current not in unit_options:
@@ -289,15 +313,12 @@ def row_form(session_key: str, title: str):
                              index=unit_options.index(unit_current) if unit_current in unit_options else 0,
                              key=f"{session_key}_unit_{i}")
 
-            # 5. Qty
             with cols[4]:
                 st.text_input("", value=r.get("qty",""), key=f"{session_key}_qty_{i}", placeholder="")
 
-            # 6. Rate
             with cols[5]:
                 st.text_input("", value=r.get("rate",""), key=f"{session_key}_rate_{i}", placeholder="")
 
-            # 7. Amount
             qty_widget_val = st.session_state.get(f"{session_key}_qty_{i}", r.get("qty",""))
             rate_widget_val = st.session_state.get(f"{session_key}_rate_{i}", r.get("rate",""))
             amt = _row_amount(qty_widget_val, rate_widget_val)
@@ -333,9 +354,7 @@ def row_form(session_key: str, title: str):
     st.markdown(f"**Subtotal:** ₹ {st.session_state[subtotal_key]:,.2f}")
     return st.session_state[session_key], st.session_state[subtotal_key]
 
-# ---------- UI ----------
-st.set_page_config(page_title="Tiles & Granite Inventory", layout="wide")
-
+# ---------- GLOBAL STYLES ----------
 st.markdown("""
 <style>
 html, body, [class*="css"]  { font-size: 18px !important; }
@@ -347,7 +366,7 @@ label { font-size: 18px !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ---- scheduled widget resets (fixes "cannot be modified after widget..." error) ----
+# ---- scheduled widget resets (kept as-is) ----
 def _apply_scheduled_resets():
     keys = st.session_state.pop("_reset_keys", None)
     if keys:
@@ -360,13 +379,10 @@ def _schedule_reset(*keys):
     pending.update(keys)
     st.session_state["_reset_keys"] = list(pending)
 
-# Init DB and ensure default user exists
-init_db()
+# ---- Ensure default user exists ----
 if DEFAULT_USERNAME in ALLOWED_USERS and not user_exists(DEFAULT_USERNAME):
-    try:
+    with suppress(Exception):
         create_user(DEFAULT_USERNAME, DEFAULT_PASSWORD)
-    except Exception:
-        pass
 
 st.title("Tiles & Granite Inventory")
 
@@ -432,7 +448,7 @@ with tabs[1]:
     if not prods:
         st.info("No products yet — Quick Bill below can auto-create products.")
     else:
-        prod_map = {f'{p["name"]} ({p["size"] or ""} | {p["unit"]})': p for p in prods}
+        prod_map = {f'{p["name"]} ({p.get("size","") or ""} | {p["unit"]})': p for p in prods}
         choice = st.selectbox("Product*", list(prod_map.keys()), key="purchase_product")
         p = prod_map[choice]
 
@@ -457,7 +473,7 @@ with tabs[1]:
                 _schedule_reset("purchase_qty","purchase_price","purchase_notes")
                 st.rerun()
 
-        st.caption(f"Current stock: **{product_stock(p['id'])} {p['unit']}**")
+        st.caption(f"Current stock: **{product_stock(int(p['id']))} {p['unit']}**")
 
     # ---- Quick Bill (row form) ----
     st.divider()
@@ -524,10 +540,10 @@ with tabs[2]:
     if not prods:
         st.info("No products yet — Quick Bill below can auto-create products.")
     else:
-        prod_map = {f'{p["name"]} ({p["size"] or ""} | {p["unit"]})': p for p in prods}
+        prod_map = {f'{p["name"]} ({p.get("size","") or ""} | {p["unit"]})': p for p in prods}
         choice = st.selectbox("Product*", list(prod_map.keys()), key="sale_product")
         p = prod_map[choice]
-        stock_now = product_stock(p["id"])
+        stock_now = product_stock(int(p["id"]))
 
         qty_text = st.text_input(f"Quantity to sell ({p['unit']})*", key="sale_qty", placeholder="")
         price_text = st.text_input("Selling price per unit (optional)", key="sale_price", placeholder="")
@@ -537,7 +553,7 @@ with tabs[2]:
             cust_map = {c["name"]: c for c in custs}
             sel = st.selectbox("Customer (optional)", ["-- none --"] + list(cust_map.keys()), key="sale_customer")
             if sel != "-- none --":
-                customer_id = cust_map[sel]["id"]
+                customer_id = int(cust_map[sel]["id"])
         notes = st.text_input("Bill / Invoice No. or Notes", key="sale_notes", placeholder="Invoice no / remarks")
         st.markdown(f"<div class='amount'>Line Total: ₹ {_to_float(qty_text)*_to_float(price_text):,.2f}</div>", unsafe_allow_html=True)
 
@@ -547,7 +563,7 @@ with tabs[2]:
             if qty <= 0:
                 st.error("Quantity must be > 0.")
             else:
-                ok = add_move("sale", p["id"], qty, price_per_unit=(price or None),
+                ok = add_move("sale", int(p["id"]), qty, price_per_unit=(price or None),
                               customer_id=customer_id, notes=notes or None)
                 if ok:
                     st.success("Sale saved.")
@@ -616,11 +632,10 @@ with tabs[3]:
     prods = list_products()
     if prods:
         df = pd.DataFrame(prods)
-        df["current_stock"] = df["id"].apply(product_stock)
+        df["current_stock"] = df["id"].apply(lambda pid: product_stock(int(pid)))
         df["status"] = df["current_stock"].apply(lambda x: "NEGATIVE ⚠️" if x < 0 else "")
         low_thr = st.number_input("Low stock threshold (show items below this)", min_value=0.0, step=1.0, value=10.0)
 
-        # Sort by Size then Name, and show names (no raw id column)
         view = df[["name","material","size","unit","current_stock","status"]].sort_values(["size","name"], na_position="last")
         st.dataframe(view, use_container_width=True)
 
@@ -632,10 +647,9 @@ with tabs[3]:
             st.dataframe(low[["name","size","unit","current_stock"]].sort_values(["size","name"], na_position="last"),
                          use_container_width=True)
 
-        if st.button("Export Stock to CSV"):
-            out = df[["name","material","size","unit","current_stock"]].copy().sort_values(["size","name"], na_position="last")
-            out.to_csv("stock_export.csv", index=False)
-            st.success("Saved as stock_export.csv (in the same folder).")
+        # in-memory CSV download (works on Streamlit Cloud)
+        out = df[["name","material","size","unit","current_stock"]].copy().sort_values(["size","name"], na_position="last")
+        st.download_button("⬇️ Export Stock (CSV)", data=out.to_csv(index=False), file_name="stock_export.csv", mime="text/csv")
     else:
         st.info("No products yet.")
 
@@ -647,10 +661,9 @@ with tabs[4]:
     if rows:
         rep = pd.DataFrame(rows)
         rep["time"] = pd.to_datetime(rep["ts"]).dt.strftime("%H:%M")
-        rep["qty_display"] = rep.apply(lambda r: f'{abs(r["qty"])} {r["unit"]}', axis=1)
-        rep["value"] = rep.apply(lambda r: (abs(r["qty"]) * (r["price_per_unit"] or 0.0)), axis=1)
+        rep["qty_display"] = rep.apply(lambda r: f'{abs(float(r["qty"]))} {r.get("unit","")}', axis=1)
+        rep["value"] = rep.apply(lambda r: (abs(float(r["qty"])) * float(r.get("price_per_unit", 0.0) or 0.0)), axis=1)
 
-        # Sort by size then name for display
         rep = rep.sort_values(["product_size","product_name","ts"], na_position="last")
 
         st.markdown("#### All Movements Today")
@@ -661,7 +674,6 @@ with tabs[4]:
         })
         st.dataframe(show, use_container_width=True)
 
-        # Bill-wise totals (by notes)
         st.markdown("#### Bill-wise Totals (Notes)")
         by_bill = rep.groupby(["kind","notes"], dropna=False)["value"].sum().reset_index().rename(
             columns={"notes":"Bill / Notes","value":"Total Amount"}
@@ -669,7 +681,6 @@ with tabs[4]:
         by_bill["Bill / Notes"] = by_bill["Bill / Notes"].fillna("N/A")
         st.dataframe(by_bill.sort_values(["kind","Bill / Notes"]), use_container_width=True)
 
-        # Sales by Customer
         sales = rep[rep["kind"]=="sale"].copy()
         if not sales.empty:
             st.markdown("#### Who bought today (Sales by Customer)")
@@ -683,17 +694,19 @@ with tabs[4]:
         prods = list_products()
         snap = []
         for p in prods:
-            qty_left = product_stock(p["id"])
+            qty_left = product_stock(int(p["id"]))
             snap.append({
-                "Product": p["name"], "Size": p["size"], "Unit": p["unit"],
+                "Product": p["name"], "Size": p.get("size"), "Unit": p["unit"],
                 "Stock Left": qty_left, "Status": "NEGATIVE ⚠️" if qty_left < 0 else ""
             })
         snap_df = pd.DataFrame(snap).sort_values(["Size","Product"], na_position="last")
         st.dataframe(snap_df, use_container_width=True)
 
-        if st.button(f"Export Today’s Report to CSV"):
-            show.to_csv(f"report_{day.isoformat()}.csv", index=False)
-            st.success(f"Saved as report_{day.isoformat()}.csv")
+        # in-memory CSV download for today's movements
+        st.download_button("⬇️ Export Today’s Report (CSV)",
+                           data=show.to_csv(index=False),
+                           file_name=f"report_{day.isoformat()}.csv",
+                           mime="text/csv")
     else:
         st.info("No entries on this day yet.")
 
