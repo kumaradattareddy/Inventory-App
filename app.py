@@ -1,13 +1,10 @@
-# app.py
-# Streamlit UI — same features, Google Sheets-backed
-
-import os
-from datetime import date, datetime, timedelta
+# app.py — Streamlit UI (Supabase backend)
 import pandas as pd
 import streamlit as st
 import hashlib, secrets
+from datetime import date, datetime, timedelta
 
-from sheets_db import ensure_all_tabs, fetch_df, append_row
+from supabase_db import ensure_all_tabs, fetch_df, append_row
 
 # ===================== App Config / Auth =====================
 st.set_page_config(page_title="Tiles & Granite Inventory", layout="wide")
@@ -18,7 +15,7 @@ DEFAULT_USERNAME = "venkat reddy"
 DEFAULT_PASSWORD = "1234"
 # ======================================================
 
-# Make sure the Google Sheet exists and tabs are ready
+# Make sure DB tables are reachable
 ensure_all_tabs()
 
 # ---------- Styling ----------
@@ -86,6 +83,7 @@ def _clear_caches():
 # ===================== AUTH helpers =====================
 
 def _hash_password(password: str, salt: str) -> str:
+    import hashlib, binascii
     dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), 100_000)
     return dk.hex()
 
@@ -107,6 +105,7 @@ def create_user(username: str, password: str):
     pwd_hash = _hash_password(password, salt)
     new_id = _next_id("Users")
     append_row("Users", [new_id, username.strip().lower(), pwd_hash, salt])
+    _clear_caches()
 
 def verify_login(username: str, password: str):
     username = username.strip().lower()
@@ -127,11 +126,10 @@ def verify_login(username: str, password: str):
 if DEFAULT_USERNAME in ALLOWED_USERS and not user_exists(DEFAULT_USERNAME):
     try:
         create_user(DEFAULT_USERNAME, DEFAULT_PASSWORD)
-        _clear_caches()
     except Exception:
         pass
 
-# ===================== Data helpers (Sheets) =====================
+# ===================== Data helpers (DB-agnostic) =====================
 
 def list_products():
     df = products_df()
@@ -268,7 +266,6 @@ def moves_on_day(d: date):
     prods = products_df().rename(columns={"name":"product_name","size":"product_size"})
     custs = customers_df().rename(columns={"name":"customer_name"})
 
-    # Left-join products and customers
     rep = mv.merge(prods[["id","product_name","product_size","unit"]], left_on="product_id", right_on="id", how="left", suffixes=("","_p"))
     rep = rep.merge(custs[["id","customer_name"]], left_on="customer_id", right_on="id", how="left", suffixes=("","_c"))
 
@@ -313,7 +310,6 @@ with top_right:
         st.rerun()
 
 # ---------- ROW FORM ----------
-# Default unit first = "box"
 DEFAULT_UNIT_OPTIONS = ["box", "pcs", "sq_ft", "bag", "kg"]
 DEFAULT_MATERIAL_OPTIONS = ["Tiles", "Granite", "Marble", "Other"]
 
@@ -330,9 +326,6 @@ def _row_amount(qty_txt: str, rate_txt: str) -> float:
         return 0.0
 
 def row_form(session_key: str, title: str):
-    """
-    Fields: Material, Size, Product Name, Unit, Qty, Rate, Amount.
-    """
     ensure_rows(session_key)
     rows = st.session_state[session_key]
 
@@ -368,7 +361,6 @@ def row_form(session_key: str, title: str):
         for i, r in enumerate(rows):
             cols = st.columns([1.1, 1.1, 2, 0.9, 0.8, 0.9, 1.1])
 
-            # 1. Material
             mat_current = (r.get("material") or "").strip()
             mat_options = DEFAULT_MATERIAL_OPTIONS.copy()
             if mat_current and mat_current not in mat_options:
@@ -378,15 +370,12 @@ def row_form(session_key: str, title: str):
                              index=mat_options.index(mat_current) if mat_current in mat_options else 0,
                              key=f"{session_key}_mat_{i}")
 
-            # 2. Size
             with cols[1]:
                 st.text_input("", value=r.get("size",""), key=f"{session_key}_size_{i}", placeholder="e.g., 600x600")
 
-            # 3. Product Name
             with cols[2]:
                 st.text_input("", value=r.get("product_name",""), key=f"{session_key}_name_{i}", placeholder="e.g., Renite")
 
-            # 4. Unit
             unit_current = (r.get("unit") or "").strip()
             unit_options = DEFAULT_UNIT_OPTIONS.copy()
             if unit_current and unit_current not in unit_options:
@@ -396,15 +385,12 @@ def row_form(session_key: str, title: str):
                              index=unit_options.index(unit_current) if unit_current in unit_options else 0,
                              key=f"{session_key}_unit_{i}")
 
-            # 5. Qty
             with cols[4]:
                 st.text_input("", value=r.get("qty",""), key=f"{session_key}_qty_{i}", placeholder="")
 
-            # 6. Rate
             with cols[5]:
                 st.text_input("", value=r.get("rate",""), key=f"{session_key}_rate_{i}", placeholder="")
 
-            # 7. Amount
             qty_widget_val = st.session_state.get(f"{session_key}_qty_{i}", r.get("qty",""))
             rate_widget_val = st.session_state.get(f"{session_key}_rate_{i}", r.get("rate",""))
             amt = _row_amount(qty_widget_val, rate_widget_val)
@@ -487,12 +473,12 @@ with tabs[1]:
         price_text = st.text_input("Price per unit (optional)", key="purchase_price", placeholder="")
         notes = st.text_input("Notes", key="purchase_notes", placeholder="Bill no / supplier / remarks")
 
-        amount = _to_float(qty_text) * _to_float(price_text)
+        amount = (float(qty_text or 0) * float(price_text or 0))
         st.markdown(f"**Amount:** ₹ {amount:,.2f}")
 
         if st.button("Save Purchase"):
-            qty = _to_float(qty_text)
-            price = _to_float(price_text)
+            qty = float(qty_text or 0)
+            price = float(price_text or 0)
             if qty <= 0:
                 st.error("Quantity must be > 0.")
             else:
@@ -533,8 +519,8 @@ with tabs[1]:
                 size = (ln.get("size") or "").strip()
                 if not name or not size:
                     continue
-                qty  = _to_float(ln.get("qty"))
-                rate = _to_float(ln.get("rate"))
+                qty  = float(ln.get("qty") or 0)
+                rate = float(ln.get("rate") or 0)
                 unit = (ln.get("unit") or unit_default).strip()
                 material = (ln.get("material") or mat_default).strip()
 
@@ -586,11 +572,11 @@ with tabs[2]:
             if sel != "-- none --":
                 customer_id = int(cust_map[sel]["id"])
         notes = st.text_input("Bill / Invoice No. or Notes", key="sale_notes", placeholder="Invoice no / remarks")
-        st.markdown(f"<div class='amount'>Line Total: ₹ {_to_float(qty_text)*_to_float(price_text):,.2f}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='amount'>Line Total: ₹ {float(qty_text or 0)*float(price_text or 0):,.2f}</div>", unsafe_allow_html=True)
 
         if st.button("Save Sale"):
-            qty = _to_float(qty_text)
-            price = _to_float(price_text)
+            qty = float(qty_text or 0)
+            price = float(price_text or 0)
             if qty <= 0:
                 st.error("Quantity must be > 0.")
             else:
@@ -633,8 +619,8 @@ with tabs[2]:
                 size = (ln.get("size") or "").strip()
                 if not name or not size:
                     continue
-                qty  = _to_float(ln.get("qty"))
-                rate = _to_float(ln.get("rate"))
+                qty  = float(ln.get("qty") or 0)
+                rate = float(ln.get("rate") or 0)
                 unit = (ln.get("unit") or unit_default).strip()
                 material = (ln.get("material") or mat_default).strip()
                 if qty <= 0:
@@ -667,7 +653,6 @@ with tabs[3]:
         df["status"] = df["current_stock"].apply(lambda x: "NEGATIVE ⚠️" if x < 0 else "")
         low_thr = st.number_input("Low stock threshold (show items below this)", min_value=0.0, step=1.0, value=10.0)
 
-        # Sort by Size then Name, and show names (no raw id column)
         view = df[["name","material","size","unit","current_stock","status"]].sort_values(["size","name"], na_position="last")
         st.dataframe(view, use_container_width=True)
 
@@ -690,15 +675,26 @@ with tabs[3]:
 with tabs[4]:
     st.subheader("Daily Report (Sales & Purchases)")
     day = st.date_input("Pick a date", value=date.today())
-    rows = moves_on_day(day)
-    if rows:
-        rep = pd.DataFrame(rows)
+    # Build report from cached dataframes to minimize queries
+    moves = stock_moves_df()
+    if not moves.empty:
+        start = datetime(day.year, day.month, day.day, 0, 0, 0)
+        end   = datetime(day.year, day.month, day.day, 23, 59, 59)
+
+        mv = moves.copy()
+        mv["ts_dt"] = pd.to_datetime(mv["ts"], errors="coerce")
+        mv = mv[(mv["ts_dt"] >= start) & (mv["ts_dt"] <= end)].sort_values("ts_dt")
+
+        prods = products_df().rename(columns={"name":"product_name","size":"product_size"})
+        custs = customers_df().rename(columns={"name":"customer_name"})
+
+        rep = mv.merge(prods[["id","product_name","product_size","unit"]], left_on="product_id", right_on="id", how="left", suffixes=("","_p"))
+        rep = rep.merge(custs[["id","customer_name"]], left_on="customer_id", right_on="id", how="left", suffixes=("","_c"))
+        rep = rep.sort_values("ts_dt")
+
         rep["time"] = pd.to_datetime(rep["ts"]).dt.strftime("%H:%M")
         rep["qty_display"] = rep.apply(lambda r: f'{abs(r["qty"])} {r.get("unit","")}', axis=1)
         rep["value"] = rep.apply(lambda r: (abs(r["qty"]) * (r["price_per_unit"] or 0.0)), axis=1)
-
-        # Sort by size then name for display
-        rep = rep.sort_values(["product_size","product_name","ts"], na_position="last")
 
         st.markdown("#### All Movements Today")
         show = rep[["time","kind","product_name","product_size","qty_display","customer_name","price_per_unit","value","notes"]]
@@ -708,7 +704,6 @@ with tabs[4]:
         })
         st.dataframe(show, use_container_width=True)
 
-        # Bill-wise totals (by notes)
         st.markdown("#### Bill-wise Totals (Notes)")
         by_bill = rep.groupby(["kind","notes"], dropna=False)["value"].sum().reset_index().rename(
             columns={"notes":"Bill / Notes","value":"Total Amount"}
@@ -716,7 +711,6 @@ with tabs[4]:
         by_bill["Bill / Notes"] = by_bill["Bill / Notes"].fillna("N/A")
         st.dataframe(by_bill.sort_values(["kind","Bill / Notes"]), use_container_width=True)
 
-        # Sales by Customer
         sales = rep[rep["kind"]=="sale"].copy()
         if not sales.empty:
             st.markdown("#### Who bought today (Sales by Customer)")
