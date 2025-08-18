@@ -59,29 +59,35 @@ def _retry(fn, attempts: int = 4, delay: float = 0.8):
 
 def _open_sheet():
     """
-    Open using SHEET_ID (preferred). If that fails, try SHEET_URL.
-    We never fall back to a bare title to avoid ambiguity.
+    Open using SHEET_ID (preferred). If APIError/SpreadsheetNotFound occurs,
+    try SHEET_URL. We never fall back to a bare title.
     """
     client = _client()
     sheet_id  = st.secrets.get("SHEET_ID") or st.secrets.get("GOOGLE_SHEET_ID")
     sheet_url = st.secrets.get("SHEET_URL")
 
+    last_err = None
+
     if sheet_id:
         try:
             return _retry(lambda: client.open_by_key(sheet_id))
-        except SpreadsheetNotFound as e:
-            email = st.secrets["gcp_service_account"].get("client_email", "service-account")
-            raise RuntimeError(
-                f"SHEET_ID found but not accessible. Share the sheet with {email} (Editor)."
-            ) from e
+        except (SpreadsheetNotFound, APIError) as e:
+            last_err = e  # remember and try URL next
 
     if sheet_url:
-        return _retry(lambda: client.open_by_url(sheet_url))
+        try:
+            return _retry(lambda: client.open_by_url(sheet_url))
+        except (SpreadsheetNotFound, APIError) as e:
+            last_err = e
 
+    email = st.secrets["gcp_service_account"].get("client_email", "service-account")
     raise RuntimeError(
-        'Missing SHEET_ID (or SHEET_URL) in Streamlit secrets. '
-        'Add: SHEET_ID = "your-google-sheet-id" at the top level.'
-    )
+        "Could not open Google Sheet.\n\n"
+        f"- Confirm the sheet is shared with: {email} (Editor)\n"
+        "- Ensure Google Drive API AND Google Sheets API are enabled\n"
+        "- Verify SHEET_ID and (optional) SHEET_URL in secrets\n"
+        f"- SHEET_ID used: {sheet_id!r}"
+    ) from last_err
 
 def _ensure_tab(sh, tab_name: str, headers: list[str]):
     """
