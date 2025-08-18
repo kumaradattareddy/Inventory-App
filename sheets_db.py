@@ -1,3 +1,6 @@
+# sheets_db.py
+# Google Sheets “DB” helper — resilient + cached
+
 import time
 import streamlit as st
 import pandas as pd
@@ -5,6 +8,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import WorksheetNotFound, SpreadsheetNotFound, APIError
 
+# ---- Tabs / schema your app expects (row-1 headers) ----
 REQUIRED_TABS = {
     "Products":   ["id", "name", "material", "size", "unit", "opening_stock"],
     "Customers":  ["id", "name", "phone", "address"],
@@ -12,12 +16,15 @@ REQUIRED_TABS = {
     "Users":      ["id", "username", "password_hash", "salt"],
 }
 
+# Which columns should be numeric when building DataFrames
 NUMERIC_COLUMNS = {
     "Products":   {"id", "opening_stock"},
     "Customers":  {"id"},
     "StockMoves": {"id", "product_id", "qty", "price_per_unit", "customer_id"},
     "Users":      {"id"},
 }
+
+# ---------- Auth / client ----------
 
 @st.cache_resource
 def _client():
@@ -30,7 +37,8 @@ def _client():
     )
     return gspread.authorize(creds)
 
-def _retry(fn, attempts=4, delay=0.8):
+def _retry(fn, attempts: int = 4, delay: float = 0.8):
+    """Exponential backoff for transient API errors."""
     last_err = None
     for i in range(attempts):
         try:
@@ -39,12 +47,11 @@ def _retry(fn, attempts=4, delay=0.8):
             last_err = e
             time.sleep(delay * (1.6 ** i))
     if last_err:
-        # Helpful final message
         email = st.secrets["gcp_service_account"].get("client_email", "service-account")
         raise RuntimeError(
             "Google Sheets API error.\n\n"
             "- If your Google account storage is full, Sheets rejects edits/reads.\n"
-            "- Confirm the sheet is shared with: " + email + " (Editor)\n"
+            f"- Confirm the sheet is shared with: {email} (Editor)\n"
             "- Ensure **Google Drive API** and **Google Sheets API** are enabled\n"
             "- Try again in a moment (temporary API hiccup)\n"
         ) from last_err
@@ -53,7 +60,7 @@ def _retry(fn, attempts=4, delay=0.8):
 def _open_sheet():
     """
     Open using SHEET_ID (preferred). If that fails, try SHEET_URL.
-    We never fall back to a bare title.
+    We never fall back to a bare title to avoid ambiguity.
     """
     client = _client()
     sheet_id  = st.secrets.get("SHEET_ID") or st.secrets.get("GOOGLE_SHEET_ID")
@@ -102,6 +109,7 @@ def _ensure_tab(sh, tab_name: str, headers: list[str]):
     return ws
 
 def ensure_all_tabs():
+    """Called once from app.py on start."""
     try:
         sh = _open_sheet()
     except Exception as e:
@@ -111,17 +119,40 @@ def ensure_all_tabs():
         _ensure_tab(sh, tab, headers)
 
 def _ws(tab_name: str):
+    """Return a worksheet object (ensuring headers)."""
     sh = _open_sheet()
     headers = REQUIRED_TABS[tab_name]
     return _ensure_tab(sh, tab_name, headers)
 
-def fetch_df(tab_name: str) -> pd.DataFrame:
-    ws = _ws(tab_name)
-    rows = _retry(lambda: ws.get_all_records())
-    df = pd.DataFrame(rows)
-    if df.empty:
-        df = pd.DataFrame(columns=REQUIRED_TABS[tab_name])
+# ---------- Fetch (fast + cached) ----------
 
+@st.cache_data(ttl=12, show_spinner=False)
+def _fetch_values(tab_name: str, a1_range="A1:Z100000"):
+    ws = _ws(tab_name)
+    return _retry(lambda: ws.get_values(a1_range))
+
+def fetch_df(tab_name: str) -> pd.DataFrame:
+    """
+    Robust, cached fetch using get_values on a bounded range.
+    Converts to DataFrame and coerces numeric columns.
+    """
+    values = _fetch_values(tab_name, "A1:Z100000")
+    if not values:
+        return pd.DataFrame(columns=REQUIRED_TABS[tab_name])
+
+    header = values[0] if values else []
+    rows = values[1:] if len(values) > 1 else []
+
+    if not header:
+        st.warning(f"'{tab_name}' has no header row; expecting: {REQUIRED_TABS[tab_name]}")
+        return pd.DataFrame(columns=REQUIRED_TABS[tab_name])
+
+    if header != REQUIRED_TABS[tab_name]:
+        st.warning(
+            f"'{tab_name}' headers differ.\nFound: {header}\nExpected: {REQUIRED_TABS[tab_name]}"
+        )
+
+    df = pd.DataFrame(rows, columns=header)
     # Coerce numerics
     for col in NUMERIC_COLUMNS.get(tab_name, set()):
         if col in df.columns:
@@ -131,8 +162,13 @@ def fetch_df(tab_name: str) -> pd.DataFrame:
     for col in df.columns:
         if df[col].dtype == object:
             df[col] = df[col].astype(str).str.strip()
+
     return df
+
+# ---------- Writes ----------
 
 def append_row(tab_name: str, row: list):
     ws = _ws(tab_name)
     _retry(lambda: ws.append_row(row, value_input_option="USER_ENTERED"))
+    # Invalidate cached reads
+    st.cache_data.clear()
