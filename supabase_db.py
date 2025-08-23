@@ -48,11 +48,17 @@ def ensure_all_tabs():
     for tab in REQUIRED_TABS.keys():
         t = _table(tab)
         try:
-            cli.table(t).select("id").limit(1).execute()
-        except Exception:
-            missing.append(t)
+            res = cli.table(t).select("id").limit(1).execute()
+            # If res.data is None but no exception → table exists, just empty
+            if res.data is None:
+                continue
+        except Exception as e:
+            # Only treat "relation does not exist" as missing
+            if "does not exist" in str(e).lower():
+                missing.append(t)
+            else:
+                st.warning(f"⚠️ Transient error checking {t}: {e}")
     if missing:
-        st.cache_resource.clear()
         st.error(f"❌ Supabase tables not accessible: {', '.join(missing)}. Double-check schema + secrets.")
         st.stop()
 
