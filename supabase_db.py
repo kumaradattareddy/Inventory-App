@@ -50,9 +50,10 @@ def ensure_all_tabs():
         except Exception:
             missing.append(t)
     if missing:
-        st.error(f"❌ Supabase tables not accessible: {', '.join(missing)}. "
-                 "Double-check schema + secrets.")
+        st.cache_resource.clear()
+        st.error(f"❌ Supabase tables not accessible: {', '.join(missing)}. Double-check schema + secrets.")
         st.stop()
+
 
 # ---------- Reads ----------
 
