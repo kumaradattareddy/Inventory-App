@@ -28,17 +28,19 @@ def _table(tab_name: str) -> str:
         "Products":   "products",
         "Customers":  "customers",
         "StockMoves": "stock_moves",
-        "Users":      "users",
+        "Users":      "users",   # this will resolve to public.users now
     }[tab_name]
+
 
 @st.cache_resource
 def _client() -> Client:
-    url = st.secrets.get("SUPABASE_URL")
-    key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY") or st.secrets.get("SUPABASE_ANON_KEY")
-    if not url or not key:
-        st.error("❌ Supabase secrets missing. Check Streamlit Cloud > Settings > Secrets.")
-        st.stop()
-    return create_client(url, key)
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY") or st.secrets["SUPABASE_ANON_KEY"]
+    cli = create_client(url, key)
+    # Force schema to "public"
+    cli.postgrest.schema("public")
+    return cli
+
 
 def ensure_all_tabs():
     cli = _client()
