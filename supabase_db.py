@@ -33,27 +33,25 @@ def _table(tab_name: str) -> str:
 
 @st.cache_resource
 def _client() -> Client:
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY") or st.secrets["SUPABASE_ANON_KEY"]
+    url = st.secrets.get("SUPABASE_URL")
+    key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY") or st.secrets.get("SUPABASE_ANON_KEY")
+    if not url or not key:
+        st.error("❌ Supabase secrets missing. Check Streamlit Cloud > Settings > Secrets.")
+        st.stop()
     return create_client(url, key)
 
 def ensure_all_tabs():
-    """
-    For Supabase we assume tables exist (created via SQL).
-    We sanity-check presence by selecting counts; show a helpful error if missing.
-    """
     cli = _client()
-    try:
-        # quick touches to prove existence (won't pull full tables)
-        for tab in REQUIRED_TABS.keys():
-            t = _table(tab)
-            # If the table doesn't exist, Supabase returns an error; we surface a readable message.
+    missing = []
+    for tab, cols in REQUIRED_TABS.items():
+        t = _table(tab)
+        try:
             cli.table(t).select("id").limit(1).execute()
-    except Exception as e:
-        st.error(
-            "Supabase tables not found or not accessible.\n"
-            "Run the provided SQL in your Supabase project, and ensure SUPABASE_URL & key are set in secrets."
-        )
+        except Exception as e:
+            missing.append(t)
+    if missing:
+        st.error(f"❌ Supabase tables not accessible: {', '.join(missing)}. "
+                 "Double-check schema + secrets.")
         st.stop()
 
 # ---------- Reads ----------
