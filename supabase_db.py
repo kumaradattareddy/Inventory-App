@@ -43,11 +43,11 @@ def _client() -> Client:
 def ensure_all_tabs():
     cli = _client()
     missing = []
-    for tab, cols in REQUIRED_TABS.items():
+    for tab in REQUIRED_TABS.keys():
         t = _table(tab)
         try:
             cli.table(t).select("id").limit(1).execute()
-        except Exception as e:
+        except Exception:
             missing.append(t)
     if missing:
         st.error(f"❌ Supabase tables not accessible: {', '.join(missing)}. "
