@@ -95,7 +95,7 @@ def stock_moves_df():
 def _clear_caches():
     st.cache_data.clear()
 
-# ===================== NA-safe helpers =====================
+# ===================== NA/Mask helpers =====================
 def _s_txt(s):  # string Series with no NA
     return s.astype("string").fillna("")
 
@@ -114,7 +114,6 @@ def _eq_num(series, value, missing_sentinel=-10**12):
 def _as_bool(x):
     if isinstance(x, pd.Series):
         return x.fillna(False).astype(bool)
-    # For arrays/Index/BooleanArray
     return pd.Series(x).fillna(False).astype(bool)
 
 def _and_all(*conds):
@@ -123,6 +122,14 @@ def _and_all(*conds):
         b = _as_bool(c)
         mask = b if mask is None else (mask & b)
     return mask if mask is not None else None
+
+def any_true(mask) -> bool:
+    """NA-safe truthiness for boolean masks."""
+    if mask is None:
+        return False
+    if isinstance(mask, pd.Series):
+        return bool(mask.fillna(False).to_numpy().any())
+    return bool(pd.Series(mask).fillna(False).to_numpy().any())
 
 # ===================== AUTH helpers =====================
 def _hash_password(password: str, salt: str) -> str:
@@ -302,7 +309,7 @@ def add_payment(customer_id: int, kind: str, amount: float, notes: str = None,
                 _eq_text(pay["kind"], kind),
                 _eq_text(pay["notes"], notes),
             )
-            if mask is not None and bool(mask.any()):
+            if any_true(mask):
                 return False
     new_id = _next_id("Payments")
     ts = ts_dt.isoformat(timespec="seconds")
@@ -336,7 +343,7 @@ def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, suppl
                 _eq_num(df["supplier_id"], int(supplier_id) if supplier_id is not None else None, missing_sentinel=-1),
                 _eq_text(df["notes"], notes),
             )
-            if mask is not None and bool(mask.any()):
+            if any_true(mask):
                 return False
 
     new_id = _next_id("StockMoves")
