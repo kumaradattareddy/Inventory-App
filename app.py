@@ -27,7 +27,7 @@ label { font-size: 18px !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ---- scheduled widget resets (prevents "cannot be modified after widget..." error) ----
+# ---- scheduled widget resets ----
 def _apply_scheduled_resets():
     keys = st.session_state.pop("_reset_keys", None)
     if keys:
@@ -96,7 +96,7 @@ def _clear_caches():
     st.cache_data.clear()
 
 # ===================== NA-safe helpers =====================
-def _s_txt(s):
+def _s_txt(s):  # string Series with no NA
     return s.astype("string").fillna("")
 
 def _s_txt_lower(s):
@@ -107,10 +107,22 @@ def _eq_text(series, value):
     return _s_txt_lower(series).eq(v)
 
 def _eq_num(series, value, missing_sentinel=-10**12):
-    # treat None as "missing_sentinel" so it matches filled NAs; otherwise numeric compare
     s = pd.to_numeric(series, errors="coerce").fillna(missing_sentinel)
     vv = missing_sentinel if value is None else float(value)
     return s.eq(vv)
+
+def _as_bool(x):
+    if isinstance(x, pd.Series):
+        return x.fillna(False).astype(bool)
+    # For arrays/Index/BooleanArray
+    return pd.Series(x).fillna(False).astype(bool)
+
+def _and_all(*conds):
+    mask = None
+    for c in conds:
+        b = _as_bool(c)
+        mask = b if mask is None else (mask & b)
+    return mask if mask is not None else None
 
 # ===================== AUTH helpers =====================
 def _hash_password(password: str, salt: str) -> str:
@@ -229,11 +241,15 @@ def get_product_by_name_size_unit(name: str, size: str, unit: str):
     df = products_df()
     if df.empty:
         return None
-    n, s, u = (name or "").strip().lower(), (size or "").strip().lower(), (unit or "").strip()
-    mask = (_eq_text(df["name"], n) &
-            _eq_text(df["unit"], u) &
-            _eq_text(df["size"], s)).fillna(False)
-    row = df[mask]
+    n = (name or "").strip().lower()
+    s = (size or "").strip().lower()
+    u = (unit or "").strip()
+    mask = _and_all(
+        _eq_text(df["name"], n),
+        _eq_text(df["unit"], u),
+        _eq_text(df["size"], s),
+    )
+    row = df[mask] if mask is not None else pd.DataFrame()
     return None if row.empty else row.iloc[0].to_dict()
 
 def ensure_product(name: str, size: str, unit: str, material: str = None, opening_stock: float = 0.0):
@@ -248,7 +264,7 @@ def ensure_customer_by_name(name: str, phone: str = None, address: str = None):
         return None
     df = customers_df()
     if not df.empty:
-        mask = _eq_text(df["name"], nm).fillna(False)
+        mask = _and_all(_eq_text(df["name"], nm))
         row = df[mask]
         if not row.empty:
             return int(row.iloc[0]["id"])
@@ -260,7 +276,7 @@ def ensure_supplier_by_name(name: str, phone: str = None, address: str = None):
         return None
     df = suppliers_df()
     if not df.empty:
-        mask = _eq_text(df["name"], nm).fillna(False)
+        mask = _and_all(_eq_text(df["name"], nm))
         row = df[mask]
         if not row.empty:
             return int(row.iloc[0]["id"])
@@ -279,14 +295,14 @@ def add_payment(customer_id: int, kind: str, amount: float, notes: str = None,
         if not pay.empty:
             pay = pay.copy()
             pay["ts_dt"] = pd.to_datetime(pay["ts"], errors="coerce")
-            mask = (
-                pay["ts_dt"].ge(since).fillna(False) &
-                _eq_num(pay["customer_id"], int(customer_id)) &
-                pd.to_numeric(pay["amount"], errors="coerce").eq(float(amount)).fillna(False) &
-                _eq_text(pay["kind"], kind) &
-                _eq_text(pay["notes"], notes)
-            ).fillna(False)
-            if mask.any():
+            mask = _and_all(
+                pay["ts_dt"].ge(since),
+                _eq_num(pay["customer_id"], int(customer_id)),
+                pd.to_numeric(pay["amount"], errors="coerce").eq(float(amount)),
+                _eq_text(pay["kind"], kind),
+                _eq_text(pay["notes"], notes),
+            )
+            if mask is not None and bool(mask.any()):
                 return False
     new_id = _next_id("Payments")
     ts = ts_dt.isoformat(timespec="seconds")
@@ -310,17 +326,17 @@ def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, suppl
         if not df.empty:
             df = df.copy()
             df["ts_dt"] = pd.to_datetime(df["ts"], errors="coerce")
-            mask = (
-                df["ts_dt"].ge(since).fillna(False) &
-                _eq_text(df["kind"], kind) &
-                _eq_num(df["product_id"], int(product_id)) &
-                pd.to_numeric(df["qty"], errors="coerce").eq(float(ins_qty)).fillna(False) &
-                pd.to_numeric(df["price_per_unit"], errors="coerce").fillna(0.0).eq(float(price_per_unit or 0.0)) &
-                _eq_num(df["customer_id"], int(customer_id) if customer_id is not None else None, missing_sentinel=-1) &
-                _eq_num(df["supplier_id"], int(supplier_id) if supplier_id is not None else None, missing_sentinel=-1) &
-                _eq_text(df["notes"], notes)
-            ).fillna(False)
-            if mask.any():
+            mask = _and_all(
+                df["ts_dt"].ge(since),
+                _eq_text(df["kind"], kind),
+                _eq_num(df["product_id"], int(product_id)),
+                pd.to_numeric(df["qty"], errors="coerce").eq(float(ins_qty)),
+                pd.to_numeric(df["price_per_unit"], errors="coerce").fillna(0.0).eq(float(price_per_unit or 0.0)),
+                _eq_num(df["customer_id"], int(customer_id) if customer_id is not None else None, missing_sentinel=-1),
+                _eq_num(df["supplier_id"], int(supplier_id) if supplier_id is not None else None, missing_sentinel=-1),
+                _eq_text(df["notes"], notes),
+            )
+            if mask is not None and bool(mask.any()):
                 return False
 
     new_id = _next_id("StockMoves")
