@@ -27,7 +27,7 @@ label { font-size: 18px !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ---- scheduled widget resets ----
+# ---- scheduled widget resets (prevents "cannot be modified after widget..." error) ----
 def _apply_scheduled_resets():
     keys = st.session_state.pop("_reset_keys", None)
     if keys:
@@ -107,6 +107,7 @@ def _eq_text(series, value):
     return _s_txt_lower(series).eq(v)
 
 def _eq_num(series, value, missing_sentinel=-10**12):
+    # treat None as "missing_sentinel" so it matches filled NAs; otherwise numeric compare
     s = pd.to_numeric(series, errors="coerce").fillna(missing_sentinel)
     vv = missing_sentinel if value is None else float(value)
     return s.eq(vv)
@@ -160,6 +161,70 @@ if DEFAULT_USERNAME in ALLOWED_USERS and not user_exists(DEFAULT_USERNAME):
         pass
 
 # ===================== Data helpers =====================
+def list_products():
+    df = products_df()
+    return [] if df.empty else df.to_dict(orient="records")
+
+def list_customers():
+    df = customers_df()
+    return [] if df.empty else df.to_dict(orient="records")
+
+def list_suppliers():
+    df = suppliers_df()
+    return [] if df.empty else df.to_dict(orient="records")
+
+def _get_opening_stock(product_id: int) -> float:
+    df = products_df()
+    if df.empty:
+        return 0.0
+    row = df[df["id"] == product_id]
+    if row.empty:
+        return 0.0
+    return float(row.iloc[0]["opening_stock"] or 0.0)
+
+def product_stock(product_id: int) -> float:
+    opening = _get_opening_stock(product_id)
+    moves = stock_moves_df()
+    if moves.empty:
+        return float(opening)
+    s = float(moves[moves["product_id"] == product_id]["qty"].sum() or 0.0)
+    return float(opening) + s
+
+def add_product(name, material, size, unit, opening_stock):
+    new_id = _next_id("Products")
+    append_row("Products", [
+        new_id,
+        (name or "").strip(),
+        (material or "").strip() or None,
+        (size or "").strip() or None,
+        (unit or "").strip(),
+        float(opening_stock or 0.0)
+    ])
+    _clear_caches()
+    return new_id
+
+def add_customer(name, phone, address):
+    new_id = _next_id("Customers")
+    append_row("Customers", [
+        new_id,
+        (name or "").strip(),
+        (phone or "").strip() or None,
+        (address or "").strip() or None
+    ])
+    _clear_caches()
+    return new_id
+
+def add_supplier(name, phone, address):
+    new_id = _next_id("Suppliers")
+    append_row("Suppliers", [
+        new_id,
+        (name or "").strip(),
+        (phone or "").strip() or None,
+        (address or "").strip() or None
+    ])
+    _clear_caches()
+    return new_id
+
 def get_product_by_name_size_unit(name: str, size: str, unit: str):
     df = products_df()
     if df.empty:
@@ -170,6 +235,12 @@ def get_product_by_name_size_unit(name: str, size: str, unit: str):
             _eq_text(df["size"], s)).fillna(False)
     row = df[mask]
     return None if row.empty else row.iloc[0].to_dict()
+
+def ensure_product(name: str, size: str, unit: str, material: str = None, opening_stock: float = 0.0):
+    p = get_product_by_name_size_unit(name, size, unit)
+    if p:
+        return int(p["id"])
+    return add_product(name=name, material=material, size=size, unit=unit, opening_stock=opening_stock)
 
 def ensure_customer_by_name(name: str, phone: str = None, address: str = None):
     nm = (name or "").strip()
@@ -197,9 +268,11 @@ def ensure_supplier_by_name(name: str, phone: str = None, address: str = None):
 
 def add_payment(customer_id: int, kind: str, amount: float, notes: str = None,
                 when: datetime | None = None, dedupe_window_seconds: int = 120) -> bool:
+    """Record payment/advance/opening_due. Positive amount for payment/advance; opening_due is also positive here."""
     if not customer_id or amount == 0:
         return False
     ts_dt = (when or datetime.now())
+    # dedupe
     if dedupe_window_seconds and dedupe_window_seconds > 0:
         since = ts_dt - timedelta(seconds=dedupe_window_seconds)
         pay = payments_df()
@@ -223,6 +296,11 @@ def add_payment(customer_id: int, kind: str, amount: float, notes: str = None,
 
 def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, supplier_id=None, notes=None,
              when: datetime | None = None, dedupe_window_seconds: int = 120) -> bool:
+    """
+    Insert a stock move. Returns True if inserted, False if skipped as duplicate.
+    For sales → pass customer_id; for purchases → pass supplier_id.
+    Dedupes identical moves within the last dedupe_window_seconds.
+    """
     ts_dt = (when or datetime.now())
     ins_qty = -qty if (kind == "sale" and qty > 0) else qty
 
@@ -256,6 +334,43 @@ def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, suppl
     ])
     _clear_caches()
     return True
+
+def customer_balance(customer_id: int) -> float:
+    """
+    Outstanding = Σ(sales amount) + Σ(opening_due) − Σ(payments) − Σ(advances).
+    Negative result means advance/credit available.
+    """
+    if not customer_id:
+        return 0.0
+
+    mv = stock_moves_df()
+    sales_total = 0.0
+    if not mv.empty:
+        s = mv[(mv["kind"] == "sale") & (mv["customer_id"] == int(customer_id))].copy()
+        if not s.empty:
+            s["price_per_unit"] = pd.to_numeric(s["price_per_unit"], errors="coerce").fillna(0.0)
+            s["qty"] = pd.to_numeric(s["qty"], errors="coerce").fillna(0.0).abs()
+            sales_total = float((s["qty"] * s["price_per_unit"]).sum())
+
+    pay = payments_df()
+    opening_due = payments = advances = 0.0
+    if not pay.empty:
+        p = pay[pay["customer_id"] == int(customer_id)].copy()
+        k = _s_txt(p["kind"])
+        opening_due = float(p[k.eq("opening_due")]["amount"].sum() or 0.0)
+        payments    = float(p[k.eq("payment")]["amount"].sum() or 0.0)
+        advances    = float(p[k.eq("advance")]["amount"].sum() or 0.0)
+
+    return round(sales_total + opening_due - payments - advances, 2)
+
+def _to_float(txt: str) -> float:
+    s = (txt or "").strip()
+    if not s:
+        return 0.0
+    try:
+        return float(s)
+    except:
+        return 0.0
 
 # ===================== UI =====================
 st.title("Tiles & Granite Inventory")
@@ -838,7 +953,9 @@ with tabs[6]:
 
     # End-of-day stock snapshot
     prods2 = list_products()
-    snap = [{"Product": p["name"], "Size": p.get("size"), "Unit": p["unit"], "Stock Left": product_stock(int(p["id"])), "Status": "NEGATIVE ⚠️" if product_stock(int(p["id"])) < 0 else ""} for p in prods2]
+    snap = [{"Product": p["name"], "Size": p.get("size"), "Unit": p["unit"],
+             "Stock Left": product_stock(int(p["id"])),
+             "Status": "NEGATIVE ⚠️" if product_stock(int(p["id"])) < 0 else ""} for p in prods2]
     st.markdown("#### Stock Snapshot (End of Day)")
     st.dataframe(pd.DataFrame(snap).sort_values(["Size","Product"], na_position="last"), use_container_width=True)
 
