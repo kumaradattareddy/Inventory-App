@@ -1,4 +1,4 @@
-# supabase_db.py — thin Supabase wrapper used by app.py
+# supabase_db.py — thin Supabase wrapper used by app.py (HARDENED)
 import os
 import pandas as pd
 from typing import List, Dict, Any
@@ -29,6 +29,14 @@ def _is_blank(v: Any) -> bool:
     try:
         return pd.isna(v)
     except Exception:
+        return False
+
+# ====== NEW: quick readiness probe ======
+def supabase_ready() -> bool:
+    try:
+        _ = _client()
+        return True
+    except RuntimeError:
         return False
 
 def _client():
