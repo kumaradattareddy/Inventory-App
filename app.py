@@ -27,7 +27,7 @@ label { font-size: 18px !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ---- scheduled widget resets ----
+# ---- scheduled widget resets (prevents "cannot be modified after widget..." error) ----
 def _apply_scheduled_resets():
     keys = st.session_state.pop("_reset_keys", None)
     if keys:
@@ -94,42 +94,6 @@ def stock_moves_df():
 
 def _clear_caches():
     st.cache_data.clear()
-
-# ===================== NA/Mask helpers =====================
-def _s_txt(s):  # string Series with no NA
-    return s.astype("string").fillna("")
-
-def _s_txt_lower(s):
-    return _s_txt(s).str.casefold()
-
-def _eq_text(series, value):
-    v = (value or "").strip().casefold()
-    return _s_txt_lower(series).eq(v)
-
-def _eq_num(series, value, missing_sentinel=-10**12):
-    s = pd.to_numeric(series, errors="coerce").fillna(missing_sentinel)
-    vv = missing_sentinel if value is None else float(value)
-    return s.eq(vv)
-
-def _as_bool(x):
-    if isinstance(x, pd.Series):
-        return x.fillna(False).astype(bool)
-    return pd.Series(x).fillna(False).astype(bool)
-
-def _and_all(*conds):
-    mask = None
-    for c in conds:
-        b = _as_bool(c)
-        mask = b if mask is None else (mask & b)
-    return mask if mask is not None else None
-
-def any_true(mask) -> bool:
-    """NA-safe truthiness for boolean masks."""
-    if mask is None:
-        return False
-    if isinstance(mask, pd.Series):
-        return bool(mask.fillna(False).to_numpy().any())
-    return bool(pd.Series(mask).fillna(False).to_numpy().any())
 
 # ===================== AUTH helpers =====================
 def _hash_password(password: str, salt: str) -> str:
@@ -244,51 +208,6 @@ def add_supplier(name, phone, address):
     _clear_caches()
     return new_id
 
-def get_product_by_name_size_unit(name: str, size: str, unit: str):
-    df = products_df()
-    if df.empty:
-        return None
-    n = (name or "").strip().lower()
-    s = (size or "").strip().lower()
-    u = (unit or "").strip()
-    mask = _and_all(
-        _eq_text(df["name"], n),
-        _eq_text(df["unit"], u),
-        _eq_text(df["size"], s),
-    )
-    row = df[mask] if mask is not None else pd.DataFrame()
-    return None if row.empty else row.iloc[0].to_dict()
-
-def ensure_product(name: str, size: str, unit: str, material: str = None, opening_stock: float = 0.0):
-    p = get_product_by_name_size_unit(name, size, unit)
-    if p:
-        return int(p["id"])
-    return add_product(name=name, material=material, size=size, unit=unit, opening_stock=opening_stock)
-
-def ensure_customer_by_name(name: str, phone: str = None, address: str = None):
-    nm = (name or "").strip()
-    if not nm:
-        return None
-    df = customers_df()
-    if not df.empty:
-        mask = _and_all(_eq_text(df["name"], nm))
-        row = df[mask]
-        if not row.empty:
-            return int(row.iloc[0]["id"])
-    return add_customer(nm, phone, address)
-
-def ensure_supplier_by_name(name: str, phone: str = None, address: str = None):
-    nm = (name or "").strip()
-    if not nm:
-        return None
-    df = suppliers_df()
-    if not df.empty:
-        mask = _and_all(_eq_text(df["name"], nm))
-        row = df[mask]
-        if not row.empty:
-            return int(row.iloc[0]["id"])
-    return add_supplier(nm, phone, address)
-
 def add_payment(customer_id: int, kind: str, amount: float, notes: str = None,
                 when: datetime | None = None, dedupe_window_seconds: int = 120) -> bool:
     """Record payment/advance/opening_due. Positive amount for payment/advance; opening_due is also positive here."""
@@ -302,14 +221,15 @@ def add_payment(customer_id: int, kind: str, amount: float, notes: str = None,
         if not pay.empty:
             pay = pay.copy()
             pay["ts_dt"] = pd.to_datetime(pay["ts"], errors="coerce")
-            mask = _and_all(
-                pay["ts_dt"].ge(since),
-                _eq_num(pay["customer_id"], int(customer_id)),
-                pd.to_numeric(pay["amount"], errors="coerce").eq(float(amount)),
-                _eq_text(pay["kind"], kind),
-                _eq_text(pay["notes"], notes),
-            )
-            if any_true(mask):
+            mask = (
+                (pay["ts_dt"] >= since) &
+                (pd.to_numeric(pay["customer_id"], errors="coerce").fillna(-1).eq(int(customer_id))) &
+                (pd.to_numeric(pay["amount"], errors="coerce").eq(float(amount))) &
+                (pay["kind"].astype("string").fillna("").eq((kind or ""))) &
+                (pay["notes"].astype("string").fillna("").eq((notes or "")))
+            ).fillna(False)
+            dup = pay[mask]
+            if not dup.empty:
                 return False
     new_id = _next_id("Payments")
     ts = ts_dt.isoformat(timespec="seconds")
@@ -333,17 +253,20 @@ def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, suppl
         if not df.empty:
             df = df.copy()
             df["ts_dt"] = pd.to_datetime(df["ts"], errors="coerce")
-            mask = _and_all(
-                df["ts_dt"].ge(since),
-                _eq_text(df["kind"], kind),
-                _eq_num(df["product_id"], int(product_id)),
-                pd.to_numeric(df["qty"], errors="coerce").eq(float(ins_qty)),
-                pd.to_numeric(df["price_per_unit"], errors="coerce").fillna(0.0).eq(float(price_per_unit or 0.0)),
-                _eq_num(df["customer_id"], int(customer_id) if customer_id is not None else None, missing_sentinel=-1),
-                _eq_num(df["supplier_id"], int(supplier_id) if supplier_id is not None else None, missing_sentinel=-1),
-                _eq_text(df["notes"], notes),
-            )
-            if any_true(mask):
+
+            kind_match  = df["kind"].astype("string").fillna("").eq((kind or ""))
+            pid_match   = pd.to_numeric(df["product_id"], errors="coerce").eq(int(product_id))
+            qty_match   = pd.to_numeric(df["qty"], errors="coerce").eq(float(ins_qty))
+            ppu_match   = pd.to_numeric(df["price_per_unit"], errors="coerce").fillna(0.0).eq(float(price_per_unit or 0.0))
+            cust_match  = pd.to_numeric(df["customer_id"], errors="coerce").fillna(-1).eq(int(customer_id) if customer_id is not None else -1)
+            supp_match  = pd.to_numeric(df["supplier_id"], errors="coerce").fillna(-1).eq(int(supplier_id) if supplier_id is not None else -1)
+            notes_match = df["notes"].astype("string").fillna("").eq((notes or ""))
+
+            mask = ((df["ts_dt"] >= since) & kind_match & pid_match & qty_match &
+                    ppu_match & cust_match & supp_match & notes_match).fillna(False)
+
+            dup = df[mask]
+            if not dup.empty:
                 return False
 
     new_id = _next_id("StockMoves")
@@ -357,6 +280,50 @@ def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, suppl
     ])
     _clear_caches()
     return True
+
+def products_lookup_key(name: str, size: str, unit: str):
+    return (name or "").strip().lower(), (size or "").strip().lower(), (unit or "").strip()
+
+def get_product_by_name_size_unit(name: str, size: str, unit: str):
+    df = products_df()
+    if df.empty:
+        return None
+    n, s, u = products_lookup_key(name, size, unit)
+    mask = (
+        df["name"].astype("string").str.lower().fillna("").eq(n) &
+        df["unit"].astype("string").fillna("").eq(u) &
+        df["size"].astype("string").str.lower().fillna("").eq(s)
+    ).fillna(False)
+    row = df[mask]
+    return None if row.empty else row.iloc[0].to_dict()
+
+def ensure_product(name: str, size: str, unit: str, material: str = None, opening_stock: float = 0.0):
+    p = get_product_by_name_size_unit(name, size, unit)
+    if p:
+        return int(p["id"])
+    return add_product(name=name, material=material, size=size, unit=unit, opening_stock=opening_stock)
+
+def ensure_customer_by_name(name: str, phone: str = None, address: str = None):
+    nm = (name or "").strip()
+    if not nm:
+        return None
+    df = customers_df()
+    if not df.empty:
+        row = df[df["name"].astype(str).str.lower() == nm.lower()]
+        if not row.empty:
+            return int(row.iloc[0]["id"])
+    return add_customer(nm, phone, address)
+
+def ensure_supplier_by_name(name: str, phone: str = None, address: str = None):
+    nm = (name or "").strip()
+    if not nm:
+        return None
+    df = suppliers_df()
+    if not df.empty:
+        row = df[df["name"].astype(str).str.lower() == nm.lower()]
+        if not row.empty:
+            return int(row.iloc[0]["id"])
+    return add_supplier(nm, phone, address)
 
 def customer_balance(customer_id: int) -> float:
     """
@@ -378,11 +345,10 @@ def customer_balance(customer_id: int) -> float:
     pay = payments_df()
     opening_due = payments = advances = 0.0
     if not pay.empty:
-        p = pay[pay["customer_id"] == int(customer_id)].copy()
-        k = _s_txt(p["kind"])
-        opening_due = float(p[k.eq("opening_due")]["amount"].sum() or 0.0)
-        payments    = float(p[k.eq("payment")]["amount"].sum() or 0.0)
-        advances    = float(p[k.eq("advance")]["amount"].sum() or 0.0)
+        p = pay[pay["customer_id"] == int(customer_id)]
+        opening_due = float(p[p["kind"] == "opening_due"]["amount"].sum() or 0.0)
+        payments    = float(p[p["kind"] == "payment"]["amount"].sum() or 0.0)
+        advances    = float(p[p["kind"] == "advance"]["amount"].sum() or 0.0)
 
     return round(sales_total + opening_due - payments - advances, 2)
 
@@ -976,9 +942,7 @@ with tabs[6]:
 
     # End-of-day stock snapshot
     prods2 = list_products()
-    snap = [{"Product": p["name"], "Size": p.get("size"), "Unit": p["unit"],
-             "Stock Left": product_stock(int(p["id"])),
-             "Status": "NEGATIVE ⚠️" if product_stock(int(p["id"])) < 0 else ""} for p in prods2]
+    snap = [{"Product": p["name"], "Size": p.get("size"), "Unit": p["unit"], "Stock Left": product_stock(int(p["id"])), "Status": "NEGATIVE ⚠️" if product_stock(int(p["id"])) < 0 else ""} for p in prods2]
     st.markdown("#### Stock Snapshot (End of Day)")
     st.dataframe(pd.DataFrame(snap).sort_values(["Size","Product"], na_position="last"), use_container_width=True)
 
