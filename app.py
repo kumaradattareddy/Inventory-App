@@ -1,4 +1,5 @@
 # app.py — Streamlit UI (Supabase backend, with Customers, Suppliers, Payments, Products, Purchases/Sales)
+import os
 import pandas as pd
 import streamlit as st
 import hashlib, secrets
@@ -14,6 +15,15 @@ ALLOWED_USERS = {"venkat reddy"}
 DEFAULT_USERNAME = "venkat reddy"
 DEFAULT_PASSWORD = "1234"
 # ======================================================
+
+# ---------- Load Supabase creds from Streamlit secrets if present ----------
+try:
+    if "SUPABASE_URL" in st.secrets and "SUPABASE_KEY" in st.secrets:
+        os.environ.setdefault("SUPABASE_URL", st.secrets["SUPABASE_URL"])
+        os.environ.setdefault("SUPABASE_KEY", st.secrets["SUPABASE_KEY"])
+except Exception:
+    # secrets might not be available locally; that's fine
+    pass
 
 # ---------- Styling ----------
 st.markdown("""
@@ -40,8 +50,11 @@ def _schedule_reset(*keys):
     pending.update(keys)
     st.session_state["_reset_keys"] = list(pending)
 
-# ===================== Ensure tables exist =====================
-ensure_all_tabs()
+# ===================== Ensure tables exist (safe if creds missing) =====================
+try:
+    ensure_all_tabs()
+except RuntimeError as e:
+    st.warning(f"Supabase not configured yet: {e}")
 
 # ===================== Cached reads =====================
 @st.cache_data(ttl=12, show_spinner=False)
@@ -843,12 +856,12 @@ with tabs[4]:
     st.divider()
     st.subheader("Payments Ledger (All)")
     pays = payments_df()
-    if not pays.empty:
+    if not pays.empty and not cdf.empty:
         merged = pays.merge(cdf[["id","name"]], left_on="customer_id", right_on="id", how="left")
         merged = merged.rename(columns={"name":"Customer"})
         merged = merged.sort_values("ts")
         st.dataframe(merged[["ts","Customer","kind","amount","notes"]], use_container_width=True)
-    else:
+    elif pays.empty:
         st.info("No payments yet.")
 
 # ===================== Stock & Low Stock =====================
