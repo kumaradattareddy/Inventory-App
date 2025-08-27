@@ -1,11 +1,11 @@
-# app.py — Streamlit UI (Supabase backend, with Customers, Suppliers, Payments, Products, Purchases/Sales) — HARDENED
+# app.py — Streamlit UI (Supabase backend, with Customers, Suppliers, Payments, Products, Purchases/Sales)
 import os
 import pandas as pd
 import streamlit as st
 import hashlib, secrets
 from datetime import date, datetime, timedelta
 
-from supabase_db import ensure_all_tabs, fetch_df, append_row, supabase_ready
+from supabase_db import ensure_all_tabs, fetch_df, append_row
 
 # ===================== App Config / Auth =====================
 st.set_page_config(page_title="Tiles & Granite Inventory", layout="wide")
@@ -19,15 +19,14 @@ DEFAULT_PASSWORD = "1234"
 # ---------- Load Supabase creds from Streamlit secrets if present ----------
 try:
     if "SUPABASE_URL" in st.secrets and "SUPABASE_KEY" in st.secrets:
-        os.environ.setdefault("SUPABASE_URL", st.secrets["SUPABASE_URL"])  # safe: doesn't overwrite existing
-        os.environ.setdefault("SUPABASE_KEY", st.secrets["SUPABASE_KEY"])  # safe: doesn't overwrite existing
+        os.environ.setdefault("SUPABASE_URL", st.secrets["SUPABASE_URL"])
+        os.environ.setdefault("SUPABASE_KEY", st.secrets["SUPABASE_KEY"])
 except Exception:
     # secrets might not be available locally; that's fine
     pass
 
 # ---------- Styling ----------
-st.markdown(
-    """
+st.markdown("""
 <style>
 html, body, [class*="css"]  { font-size: 18px !important; }
 button, .stButton button { padding: 0.6rem 1rem !important; font-size: 18px !important; }
@@ -36,9 +35,7 @@ label { font-size: 18px !important; }
 .amount { font-weight: 700; }
 [data-testid="stForm"] { padding: 0.75rem 1rem; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); }
 </style>
-    """,
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
 # ---- scheduled widget resets (prevents "cannot be modified after widget..." error) ----
 def _apply_scheduled_resets():
@@ -46,7 +43,6 @@ def _apply_scheduled_resets():
     if keys:
         for k in set(keys):
             st.session_state.pop(k, None)
-
 _apply_scheduled_resets()
 
 def _schedule_reset(*keys):
@@ -59,10 +55,6 @@ try:
     ensure_all_tabs()
 except RuntimeError as e:
     st.warning(f"Supabase not configured yet: {e}")
-
-SUPABASE_READY = supabase_ready()
-if not SUPABASE_READY:
-    st.info("ℹ️ Running without Supabase: set SUPABASE_URL/KEY in Secrets to enable database writes.")
 
 # ===================== Cached reads =====================
 @st.cache_data(ttl=12, show_spinner=False)
@@ -146,13 +138,6 @@ def verify_login(username: str, password: str):
     username = username.strip().lower()
     if username not in ALLOWED_USERS:
         return None
-
-    # Offline/fallback auth when Supabase is not ready
-    if not SUPABASE_READY:
-        if username == DEFAULT_USERNAME and password == DEFAULT_PASSWORD:
-            return {"username": username}
-        return None
-
     df = users_df()
     if df.empty:
         return None
@@ -164,8 +149,8 @@ def verify_login(username: str, password: str):
         return {"username": row["username"]}
     return None
 
-# Ensure default user exists (best-effort)
-if DEFAULT_USERNAME in ALLOWED_USERS and SUPABASE_READY and not user_exists(DEFAULT_USERNAME):
+# Ensure default user exists
+if DEFAULT_USERNAME in ALLOWED_USERS and not user_exists(DEFAULT_USERNAME):
     try:
         create_user(DEFAULT_USERNAME, DEFAULT_PASSWORD)
     except Exception:
@@ -310,8 +295,7 @@ def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, suppl
     return True
 
 def products_lookup_key(name: str, size: str, unit: str):
-    # Normalize unit to lower as well to avoid accidental duplicates with case differences
-    return (name or "").strip().lower(), (size or "").strip().lower(), (unit or "").strip().lower()
+    return (name or "").strip().lower(), (size or "").strip().lower(), (unit or "").strip()
 
 def get_product_by_name_size_unit(name: str, size: str, unit: str):
     df = products_df()
@@ -320,7 +304,7 @@ def get_product_by_name_size_unit(name: str, size: str, unit: str):
     n, s, u = products_lookup_key(name, size, unit)
     mask = (
         df["name"].astype("string").str.lower().fillna("").eq(n) &
-        df["unit"].astype("string").str.lower().fillna("").eq(u) &
+        df["unit"].astype("string").fillna("").eq(u) &
         df["size"].astype("string").str.lower().fillna("").eq(s)
     ).fillna(False)
     row = df[mask]
@@ -554,13 +538,10 @@ with tabs[0]:
         if not (cname or "").strip():
             st.error("Customer Name is required.")
         else:
-            try:
-                add_customer(cname, cphone, caddr)
-                st.success("Customer added.")
-                _schedule_reset("cust_name","cust_phone","cust_addr")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Couldn't add customer: {e}")
+            add_customer(cname, cphone, caddr)
+            st.success("Customer added.")
+            _schedule_reset("cust_name","cust_phone","cust_addr")
+            st.rerun()
 
     st.divider()
     st.subheader("All Customers (with balance)")
@@ -582,13 +563,10 @@ with tabs[1]:
         if not (sname or "").strip():
             st.error("Supplier Name is required.")
         else:
-            try:
-                add_supplier(sname, sphone, saddr)
-                st.success("Supplier added.")
-                _schedule_reset("sup_name","sup_phone","sup_addr")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Couldn't add supplier: {e}")
+            add_supplier(sname, sphone, saddr)
+            st.success("Supplier added.")
+            _schedule_reset("sup_name","sup_phone","sup_addr")
+            st.rerun()
 
     st.divider()
     st.subheader("All Suppliers")
@@ -627,22 +605,19 @@ with tabs[2]:
         st.markdown(f"**Amount:** ₹ {amount:,.2f}")
 
         if st.button("Save Purchase"):
-            try:
-                qty = float(qty_text or 0)
-                price = float(price_text or 0)
-                if qty <= 0:
-                    st.error("Quantity must be > 0.")
+            qty = float(qty_text or 0)
+            price = float(price_text or 0)
+            if qty <= 0:
+                st.error("Quantity must be > 0.")
+            else:
+                ok = add_move("purchase", int(p["id"]), qty, price_per_unit=(price or None),
+                              supplier_id=supplier_id, notes=notes or None)
+                if ok:
+                    st.success("Purchase saved.")
                 else:
-                    ok = add_move("purchase", int(p["id"]), qty, price_per_unit=(price or None),
-                                  supplier_id=supplier_id, notes=notes or None)
-                    if ok:
-                        st.success("Purchase saved.")
-                    else:
-                        st.warning("Skipped duplicate purchase (same line recently saved).")
-                    _schedule_reset("purchase_qty","purchase_price","purchase_notes","purchase_supplier")
-                    st.rerun()
-            except Exception as e:
-                st.error(f"Couldn't save purchase: {e}")
+                    st.warning("Skipped duplicate purchase (same line recently saved).")
+                _schedule_reset("purchase_qty","purchase_price","purchase_notes","purchase_supplier")
+                st.rerun()
 
         st.caption(f"Current stock: **{product_stock(int(p['id']))} {p['unit']}**")
 
@@ -742,24 +717,21 @@ with tabs[3]:
             st.caption(f"New balance after this line & advance: **₹ {new_bal:,.2f}**")
 
         if st.button("Save Sale"):
-            try:
-                qty = float(qty_text or 0)
-                price = float(price_text or 0)
-                if qty <= 0:
-                    st.error("Quantity must be > 0.")
+            qty = float(qty_text or 0)
+            price = float(price_text or 0)
+            if qty <= 0:
+                st.error("Quantity must be > 0.")
+            else:
+                ok = add_move("sale", int(p["id"]), qty, price_per_unit=(price or None),
+                              customer_id=customer_id, notes=notes or None)
+                if ok:
+                    if customer_id and float(adv_now or 0) > 0:
+                        add_payment(customer_id, "payment", float(adv_now), notes=f"Advance for {notes}" if notes else "Advance")
+                    st.success("Sale saved.")
                 else:
-                    ok = add_move("sale", int(p["id"]), qty, price_per_unit=(price or None),
-                                  customer_id=customer_id, notes=notes or None)
-                    if ok:
-                        if customer_id and float(adv_now or 0) > 0:
-                            add_payment(customer_id, "payment", float(adv_now), notes=f"Advance for {notes}" if notes else "Advance")
-                        st.success("Sale saved.")
-                    else:
-                        st.warning("Skipped duplicate sale (same line recently saved).")
-                    _schedule_reset("sale_qty","sale_price","sale_notes","sale_customer","sale_adv")
-                    st.rerun()
-            except Exception as e:
-                st.error(f"Couldn't save sale: {e}")
+                    st.warning("Skipped duplicate sale (same line recently saved).")
+                _schedule_reset("sale_qty","sale_price","sale_notes","sale_customer","sale_adv")
+                st.rerun()
 
         if stock_now < 0:
             st.caption(f"<span class='negative'>Current stock: {stock_now} {p['unit']} (negative)</span>", unsafe_allow_html=True)
@@ -863,15 +835,12 @@ with tabs[4]:
             if amt == 0:
                 st.warning("Amount cannot be 0.")
             else:
-                try:
-                    if add_payment(cid, kind, float(amt), notes=note):
-                        nb = customer_balance(cid)
-                        st.success(f"Saved. New balance: ₹ {nb:,.2f}" if nb >= 0 else f"Saved. Advance: ₹ {abs(nb):,.2f}")
-                        _schedule_reset("pay_amt","pay_note"); st.rerun()
-                    else:
-                        st.warning("Looks like a duplicate; nothing saved.")
-                except Exception as e:
-                    st.error(f"Couldn't record: {e}")
+                if add_payment(cid, kind, float(amt), notes=note):
+                    nb = customer_balance(cid)
+                    st.success(f"Saved. New balance: ₹ {nb:,.2f}" if nb >= 0 else f"Saved. Advance: ₹ {abs(nb):,.2f}")
+                    _schedule_reset("pay_amt","pay_note"); st.rerun()
+                else:
+                    st.warning("Looks like a duplicate; nothing saved.")
 
     st.divider()
     st.subheader("Balances (Due or Advance)")
