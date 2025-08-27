@@ -1,4 +1,4 @@
-# app.py — Streamlit UI (Supabase backend, with Customers, Suppliers, Payments, Products, Purchases/Sales)
+# app.py — Streamlit UI (Supabase backend)
 import pandas as pd
 import streamlit as st
 import hashlib, secrets
@@ -15,6 +15,9 @@ DEFAULT_USERNAME = "venkat reddy"
 DEFAULT_PASSWORD = "1234"
 # ======================================================
 
+# Make sure DB tables are reachable
+ensure_all_tabs()
+
 # ---------- Styling ----------
 st.markdown("""
 <style>
@@ -27,7 +30,7 @@ label { font-size: 18px !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ---- scheduled widget resets (prevents "cannot be modified after widget..." error) ----
+# ---- scheduled widget resets (fixes "cannot be modified after widget..." error) ----
 def _apply_scheduled_resets():
     keys = st.session_state.pop("_reset_keys", None)
     if keys:
@@ -40,10 +43,8 @@ def _schedule_reset(*keys):
     pending.update(keys)
     st.session_state["_reset_keys"] = list(pending)
 
-# ===================== Ensure tables exist =====================
-ensure_all_tabs()
+# ===================== Cached table reads =====================
 
-# ===================== Cached reads =====================
 @st.cache_data(ttl=12, show_spinner=False)
 def users_df():
     df = fetch_df("Users")
@@ -67,26 +68,10 @@ def customers_df():
     return df
 
 @st.cache_data(ttl=12, show_spinner=False)
-def suppliers_df():
-    df = fetch_df("Suppliers")
-    if not df.empty:
-        df["id"] = pd.to_numeric(df["id"], errors="coerce").astype("Int64")
-    return df
-
-@st.cache_data(ttl=12, show_spinner=False)
-def payments_df():
-    df = fetch_df("Payments")
-    if not df.empty:
-        df["id"] = pd.to_numeric(df["id"], errors="coerce").astype("Int64")
-        df["customer_id"] = pd.to_numeric(df["customer_id"], errors="coerce").astype("Int64")
-        df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
-    return df
-
-@st.cache_data(ttl=12, show_spinner=False)
 def stock_moves_df():
     df = fetch_df("StockMoves")
     if not df.empty:
-        for col in ["id", "product_id", "customer_id", "supplier_id"]:
+        for col in ["id", "product_id", "customer_id"]:
             df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
         df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0.0)
         df["price_per_unit"] = pd.to_numeric(df["price_per_unit"], errors="coerce").fillna(0.0)
@@ -96,7 +81,9 @@ def _clear_caches():
     st.cache_data.clear()
 
 # ===================== AUTH helpers =====================
+
 def _hash_password(password: str, salt: str) -> str:
+    import hashlib, binascii
     dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), 100_000)
     return dk.hex()
 
@@ -142,17 +129,14 @@ if DEFAULT_USERNAME in ALLOWED_USERS and not user_exists(DEFAULT_USERNAME):
     except Exception:
         pass
 
-# ===================== Data helpers =====================
+# ===================== Data helpers (DB-agnostic) =====================
+
 def list_products():
     df = products_df()
     return [] if df.empty else df.to_dict(orient="records")
 
 def list_customers():
     df = customers_df()
-    return [] if df.empty else df.to_dict(orient="records")
-
-def list_suppliers():
-    df = suppliers_df()
     return [] if df.empty else df.to_dict(orient="records")
 
 def _get_opening_stock(product_id: int) -> float:
@@ -196,51 +180,11 @@ def add_customer(name, phone, address):
     _clear_caches()
     return new_id
 
-def add_supplier(name, phone, address):
-    new_id = _next_id("Suppliers")
-    append_row("Suppliers", [
-        new_id,
-        (name or "").strip(),
-        (phone or "").strip() or None,
-        (address or "").strip() or None
-    ])
-    _clear_caches()
-    return new_id
-
-def add_payment(customer_id: int, kind: str, amount: float, notes: str = None,
-                when: datetime | None = None, dedupe_window_seconds: int = 120) -> bool:
-    """Record payment/advance/opening_due. Positive amount for payment/advance; opening_due is also positive here."""
-    if not customer_id or amount == 0:
-        return False
-    ts_dt = (when or datetime.now())
-    # dedupe
-    if dedupe_window_seconds and dedupe_window_seconds > 0:
-        since = ts_dt - timedelta(seconds=dedupe_window_seconds)
-        pay = payments_df()
-        if not pay.empty:
-            pay = pay.copy()
-            pay["ts_dt"] = pd.to_datetime(pay["ts"], errors="coerce")
-            dup = pay[
-                (pay["ts_dt"] >= since) &
-                (pay["customer_id"] == int(customer_id)) &
-                (pay["amount"] == float(amount)) &
-                (pay["kind"].fillna("") == (kind or "")) &
-                (pay["notes"].fillna("") == (notes or ""))
-            ]
-            if not dup.empty:
-                return False
-    new_id = _next_id("Payments")
-    ts = ts_dt.isoformat(timespec="seconds")
-    append_row("Payments", [new_id, ts, int(customer_id), kind, float(amount), (notes or None)])
-    _clear_caches()
-    return True
-
-def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, supplier_id=None, notes=None,
+def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, notes=None,
              when: datetime | None = None, dedupe_window_seconds: int = 120) -> bool:
     """
     Insert a stock move. Returns True if inserted, False if skipped as duplicate.
-    For sales → pass customer_id; for purchases → pass supplier_id.
-    Dedupes identical moves within the last dedupe_window_seconds.
+    Dedupes identical moves within the last `dedupe_window_seconds`.
     """
     ts_dt = (when or datetime.now())
     ins_qty = -qty if (kind == "sale" and qty > 0) else qty
@@ -258,7 +202,6 @@ def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, suppl
                 (df["qty"] == float(ins_qty)) &
                 (df["price_per_unit"].fillna(0.0) == float(price_per_unit or 0.0)) &
                 ((df["customer_id"].fillna(-1)) == (int(customer_id) if customer_id is not None else -1)) &
-                ((df["supplier_id"].fillna(-1)) == (int(supplier_id) if supplier_id is not None else -1)) &
                 (df["notes"].fillna("") == (notes or ""))
             ]
             if not dup.empty:
@@ -270,7 +213,6 @@ def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, suppl
         new_id, ts, kind, int(product_id), float(ins_qty),
         (float(price_per_unit) if price_per_unit not in (None, "") else None),
         (int(customer_id) if customer_id not in (None, "") else None),
-        (int(supplier_id) if supplier_id not in (None, "") else None),
         (notes or None)
     ])
     _clear_caches()
@@ -309,43 +251,27 @@ def ensure_customer_by_name(name: str, phone: str = None, address: str = None):
             return int(row.iloc[0]["id"])
     return add_customer(nm, phone, address)
 
-def ensure_supplier_by_name(name: str, phone: str = None, address: str = None):
-    nm = (name or "").strip()
-    if not nm:
-        return None
-    df = suppliers_df()
-    if not df.empty:
-        row = df[df["name"].astype(str).str.lower() == nm.lower()]
-        if not row.empty:
-            return int(row.iloc[0]["id"])
-    return add_supplier(nm, phone, address)
-
-def customer_balance(customer_id: int) -> float:
-    """
-    Outstanding = Σ(sales amount) + Σ(opening_due) − Σ(payments) − Σ(advances).
-    Negative result means advance/credit available.
-    """
-    if not customer_id:
-        return 0.0
+def moves_on_day(d: date):
+    start = datetime(d.year, d.month, d.day, 0, 0, 0)
+    end   = datetime(d.year, d.month, d.day, 23, 59, 59)
 
     mv = stock_moves_df()
-    sales_total = 0.0
-    if not mv.empty:
-        s = mv[(mv["kind"] == "sale") & (mv["customer_id"] == int(customer_id))].copy()
-        if not s.empty:
-            s["price_per_unit"] = pd.to_numeric(s["price_per_unit"], errors="coerce").fillna(0.0)
-            s["qty"] = pd.to_numeric(s["qty"], errors="coerce").fillna(0.0).abs()
-            sales_total = float((s["qty"] * s["price_per_unit"]).sum())
+    if mv.empty:
+        return []
 
-    pay = payments_df()
-    opening_due = payments = advances = 0.0
-    if not pay.empty:
-        p = pay[pay["customer_id"] == int(customer_id)]
-        opening_due = float(p[p["kind"] == "opening_due"]["amount"].sum() or 0.0)
-        payments    = float(p[p["kind"] == "payment"]["amount"].sum() or 0.0)
-        advances    = float(p[p["kind"] == "advance"]["amount"].sum() or 0.0)
+    mv = mv.copy()
+    mv["ts_dt"] = pd.to_datetime(mv["ts"], errors="coerce")
+    mv = mv[(mv["ts_dt"] >= start) & (mv["ts_dt"] <= end)].sort_values("ts_dt")
 
-    return round(sales_total + opening_due - payments - advances, 2)
+    prods = products_df().rename(columns={"name":"product_name","size":"product_size"})
+    custs = customers_df().rename(columns={"name":"customer_name"})
+
+    rep = mv.merge(prods[["id","product_name","product_size","unit"]], left_on="product_id", right_on="id", how="left", suffixes=("","_p"))
+    rep = rep.merge(custs[["id","customer_name"]], left_on="customer_id", right_on="id", how="left", suffixes=("","_c"))
+
+    rep = rep.drop(columns=[c for c in ["id_p","id_c"] if c in rep.columns], errors="ignore")
+    rep = rep.sort_values("ts_dt")
+    return rep.to_dict(orient="records")
 
 def _to_float(txt: str) -> float:
     s = (txt or "").strip()
@@ -357,6 +283,7 @@ def _to_float(txt: str) -> float:
         return 0.0
 
 # ===================== UI =====================
+
 st.title("Tiles & Granite Inventory")
 
 # ---- LOGIN WALL ----
@@ -502,10 +429,8 @@ def row_form(session_key: str, title: str):
 # --------- TABS ----------
 tabs = st.tabs([
     "👥 Customers",
-    "🏭 Suppliers",
     "📦 Purchase (Stock In)",
     "🧾 Sale (Stock Out)",
-    "💵 Payments & Balances",
     "📊 Stock & Low Stock",
     "🗓️ Daily Report"
 ])
@@ -526,44 +451,17 @@ with tabs[0]:
             st.rerun()
 
     st.divider()
-    st.subheader("All Customers (with balance)")
-    custs_df = customers_df()
-    if not custs_df.empty:
-        show = custs_df.copy()
-        show["Balance (+due / −adv)"] = show["id"].astype(int).apply(customer_balance)
-        st.dataframe(show[["id","name","phone","address","Balance (+due / −adv)"]], use_container_width=True)
+    st.subheader("All Customers")
+    custs = list_customers()
+    if custs:
+        st.dataframe(pd.DataFrame(custs)[["id","name","phone","address"]], use_container_width=True)
     else:
         st.info("No customers yet.")
 
-# ===================== Suppliers =====================
-with tabs[1]:
-    st.subheader("Add Supplier (single)")
-    sname = st.text_input("Supplier Name*", key="sup_name", placeholder="e.g., ABC Ceramics")
-    sphone = st.text_input("Phone", key="sup_phone", placeholder="e.g., 9876543210")
-    saddr = st.text_area("Address", key="sup_addr", placeholder="Area / City / Notes")
-    if st.button("Add Supplier"):
-        if not (sname or "").strip():
-            st.error("Supplier Name is required.")
-        else:
-            add_supplier(sname, sphone, saddr)
-            st.success("Supplier added.")
-            _schedule_reset("sup_name","sup_phone","sup_addr")
-            st.rerun()
-
-    st.divider()
-    st.subheader("All Suppliers")
-    sups_df = suppliers_df()
-    if not sups_df.empty:
-        st.dataframe(sups_df[["id","name","phone","address"]], use_container_width=True)
-    else:
-        st.info("No suppliers yet.")
-
 # ===================== Purchase (IN) =====================
-with tabs[2]:
+with tabs[1]:
     st.subheader("Record Purchase (single line)")
     prods = list_products()
-    sups = list_suppliers()
-
     if not prods:
         st.info("No products yet — Quick Bill below can auto-create products.")
     else:
@@ -573,14 +471,6 @@ with tabs[2]:
 
         qty_text = st.text_input(f"Quantity ({p['unit']})*", key="purchase_qty", placeholder="")
         price_text = st.text_input("Price per unit (optional)", key="purchase_price", placeholder="")
-
-        supplier_id = None
-        if sups:
-            sup_map = {s["name"]: s for s in sups}
-            sel = st.selectbox("Supplier (optional)", ["-- none --"] + list(sup_map.keys()), key="purchase_supplier")
-            if sel != "-- none --":
-                supplier_id = int(sup_map[sel]["id"])
-
         notes = st.text_input("Notes", key="purchase_notes", placeholder="Bill no / supplier / remarks")
 
         amount = (float(qty_text or 0) * float(price_text or 0))
@@ -592,13 +482,12 @@ with tabs[2]:
             if qty <= 0:
                 st.error("Quantity must be > 0.")
             else:
-                ok = add_move("purchase", int(p["id"]), qty, price_per_unit=(price or None),
-                              supplier_id=supplier_id, notes=notes or None)
+                ok = add_move("purchase", int(p["id"]), qty, price_per_unit=(price or None), notes=notes or None)
                 if ok:
                     st.success("Purchase saved.")
                 else:
                     st.warning("Skipped duplicate purchase (same line recently saved).")
-                _schedule_reset("purchase_qty","purchase_price","purchase_notes","purchase_supplier")
+                _schedule_reset("purchase_qty","purchase_price","purchase_notes")
                 st.rerun()
 
         st.caption(f"Current stock: **{product_stock(int(p['id']))} {p['unit']}**")
@@ -621,7 +510,7 @@ with tabs[2]:
 
             unit_default = first_non_blank(rows_in, "unit", "box")
             mat_default  = first_non_blank(rows_in, "material", "Tiles")
-            supplier_id = ensure_supplier_by_name(supplier_name) if supplier_name else None
+            supplier_id = ensure_customer_by_name(supplier_name) if supplier_name else None
 
             saved = 0
             created_only = 0
@@ -640,7 +529,7 @@ with tabs[2]:
                 if qty > 0:
                     note = f"Bill {bill_no_in}" if bill_no_in else None
                     if add_move("purchase", pid, qty, price_per_unit=(rate or None),
-                                supplier_id=supplier_id, notes=(note or None)):
+                                customer_id=supplier_id, notes=(note or None)):
                         saved += 1
                 else:
                     created_only += 1
@@ -661,7 +550,7 @@ with tabs[2]:
             st.error(f"Error: {e}")
 
 # ===================== Sale (OUT) =====================
-with tabs[3]:
+with tabs[2]:
     st.subheader("Record Sale (single line)")
     prods = list_products()
     custs = list_customers()
@@ -677,26 +566,13 @@ with tabs[3]:
         price_text = st.text_input("Selling price per unit (optional)", key="sale_price", placeholder="")
 
         customer_id = None
-        adv_now = 0.0
         if custs:
             cust_map = {c["name"]: c for c in custs}
             sel = st.selectbox("Customer (optional)", ["-- none --"] + list(cust_map.keys()), key="sale_customer")
             if sel != "-- none --":
                 customer_id = int(cust_map[sel]["id"])
-                prev_bal = customer_balance(customer_id)
-                if prev_bal >= 0:
-                    st.info(f"**Prev. balance for {sel}: ₹ {prev_bal:,.2f} (due)**")
-                else:
-                    st.success(f"**Advance available for {sel}: ₹ {abs(prev_bal):,.2f}**")
-                adv_now = st.number_input("Advance received now (optional)", min_value=0.0, step=100.0, value=0.0, key="sale_adv")
-
         notes = st.text_input("Bill / Invoice No. or Notes", key="sale_notes", placeholder="Invoice no / remarks")
-        line_total = float(qty_text or 0)*float(price_text or 0)
-        st.markdown(f"<div class='amount'>Line Total: ₹ {line_total:,.2f}</div>", unsafe_allow_html=True)
-
-        if customer_id:
-            new_bal = customer_balance(customer_id) + line_total - float(adv_now or 0)
-            st.caption(f"New balance after this line & advance: **₹ {new_bal:,.2f}**")
+        st.markdown(f"<div class='amount'>Line Total: ₹ {float(qty_text or 0)*float(price_text or 0):,.2f}</div>", unsafe_allow_html=True)
 
         if st.button("Save Sale"):
             qty = float(qty_text or 0)
@@ -707,12 +583,10 @@ with tabs[3]:
                 ok = add_move("sale", int(p["id"]), qty, price_per_unit=(price or None),
                               customer_id=customer_id, notes=notes or None)
                 if ok:
-                    if customer_id and float(adv_now or 0) > 0:
-                        add_payment(customer_id, "payment", float(adv_now), notes=f"Advance for {notes}" if notes else "Advance")
                     st.success("Sale saved.")
                 else:
                     st.warning("Skipped duplicate sale (same line recently saved).")
-                _schedule_reset("sale_qty","sale_price","sale_notes","sale_customer","sale_adv")
+                _schedule_reset("sale_qty","sale_price","sale_notes","sale_customer")
                 st.rerun()
 
         if stock_now < 0:
@@ -725,30 +599,14 @@ with tabs[3]:
     bill_no_out = st.text_input("Bill / Invoice No. (optional)", key="bill_no_out")
     cust_out_name = st.text_input("Customer Name (optional)", key="customer_out")
 
-    # Balance preview if existing customer typed
-    cust_preview_id = None
-    cdf = customers_df()
-    if not cdf.empty and (cust_out_name or "").strip():
-        row = cdf[cdf["name"].astype(str).str.lower() == cust_out_name.strip().lower()]
-        if not row.empty:
-            cust_preview_id = int(row.iloc[0]["id"])
-            bal = customer_balance(cust_preview_id)
-            if bal >= 0: st.info(f"Prev. balance: ₹ {bal:,.2f}")
-            else:       st.success(f"Advance available: ₹ {abs(bal):,.2f}")
-
-    bill_adv = st.number_input("Advance received now for this bill (optional)", min_value=0.0, step=100.0, value=0.0, key="sale_bill_adv")
-
     rows_out, subtotal_out = row_form("rows_sale", "Items")
-    if cust_preview_id is not None:
-        preview_new_bal = customer_balance(cust_preview_id) + float(subtotal_out or 0) - float(bill_adv or 0)
-        st.caption(f"New balance after this bill & advance: **₹ {preview_new_bal:,.2f}**")
-
     if st.button("Save Sales Bill", key="save_sales_bill"):
         try:
             def first_non_blank(items, key, fallback):
                 for r in items:
-                    v = (r.get(key) or "").strip()
-                    if v: return v
+                    val = (r.get(key) or "").strip()
+                    if val:
+                        return val
                 return fallback
 
             unit_default = first_non_blank(rows_out, "unit", "box")
@@ -773,81 +631,20 @@ with tabs[3]:
                             customer_id=cust_id, notes=(note or None)):
                     saved += 1
 
-            adv_msg = ""
-            if cust_id and float(bill_adv or 0) > 0:
-                if add_payment(cust_id, "payment", float(bill_adv),
-                               notes=f"Advance for Bill {bill_no_out}" if bill_no_out else "Advance for bill"):
-                    adv_msg = f" & recorded advance ₹{float(bill_adv):,.2f}"
-
             if saved:
-                st.success(f"Saved {saved} sale line(s){adv_msg}.")
+                st.success(f"Saved {saved} sale line(s).")
                 st.session_state["rows_sale"] = [
                     {"material":"","product_name":"","size":"","unit":"","qty":"","rate":""} for _ in range(6)
                 ]
-                _schedule_reset("bill_no_out","customer_out","sale_bill_adv")
+                _schedule_reset("bill_no_out","customer_out")
                 st.rerun()
             else:
                 st.warning("Nothing to save. Fill at least Product, Size and Qty > 0.")
         except Exception as e:
             st.error(f"Error: {e}")
 
-# ===================== Payments & Balances =====================
-with tabs[4]:
-    st.subheader("Record Payment / Opening Due")
-    custs = list_customers()
-    if not custs:
-        st.info("Add a customer first.")
-    else:
-        cmap = {c["name"]: c for c in custs}
-        cname = st.selectbox("Customer", list(cmap.keys()), key="pay_cust")
-        cid = int(cmap[cname]["id"])
-        cur_bal = customer_balance(cid)
-        if cur_bal >= 0:
-            st.info(f"Current balance: ₹ {cur_bal:,.2f} (customer owes you)")
-        else:
-            st.success(f"Advance credit: ₹ {abs(cur_bal):,.2f}")
-
-        mode = st.radio("What are you recording?", ["Payment received", "Opening due (+due)", "Advance (credit)"], horizontal=True)
-        amt = st.number_input("Amount", min_value=0.0, step=100.0, value=0.0, key="pay_amt")
-        note = st.text_input("Notes", key="pay_note")
-
-        kind = {"Payment received":"payment", "Opening due (+due)":"opening_due", "Advance (credit)":"advance"}[mode]
-
-        if st.button("Save"):
-            if amt == 0:
-                st.warning("Amount cannot be 0.")
-            else:
-                if add_payment(cid, kind, float(amt), notes=note):
-                    nb = customer_balance(cid)
-                    st.success(f"Saved. New balance: ₹ {nb:,.2f}" if nb >= 0 else f"Saved. Advance: ₹ {abs(nb):,.2f}")
-                    _schedule_reset("pay_amt","pay_note"); st.rerun()
-                else:
-                    st.warning("Looks like a duplicate; nothing saved.")
-
-    st.divider()
-    st.subheader("Balances (Due or Advance)")
-    cdf = customers_df()
-    if not cdf.empty:
-        rows = []
-        for _, r in cdf.iterrows():
-            cid = int(r["id"]); bal = customer_balance(cid)
-            rows.append({"Customer": r["name"], "Phone": r["phone"], "Balance (+due / −adv)": bal})
-        bal_df = pd.DataFrame(rows).sort_values("Customer")
-        st.dataframe(bal_df, use_container_width=True)
-
-    st.divider()
-    st.subheader("Payments Ledger (All)")
-    pays = payments_df()
-    if not pays.empty:
-        merged = pays.merge(cdf[["id","name"]], left_on="customer_id", right_on="id", how="left")
-        merged = merged.rename(columns={"name":"Customer"})
-        merged = merged.sort_values("ts")
-        st.dataframe(merged[["ts","Customer","kind","amount","notes"]], use_container_width=True)
-    else:
-        st.info("No payments yet.")
-
 # ===================== Stock & Low Stock =====================
-with tabs[5]:
+with tabs[3]:
     st.subheader("Stock Levels")
     prods = list_products()
     if prods:
@@ -875,35 +672,35 @@ with tabs[5]:
         st.info("No products yet.")
 
 # ===================== Daily Report =====================
-with tabs[6]:
-    st.subheader("Daily Report (Sales, Purchases & Payments)")
+with tabs[4]:
+    st.subheader("Daily Report (Sales & Purchases)")
     day = st.date_input("Pick a date", value=date.today())
-    start = datetime(day.year, day.month, day.day, 0, 0, 0)
-    end   = datetime(day.year, day.month, day.day, 23, 59, 59)
-
+    # Build report from cached dataframes to minimize queries
     moves = stock_moves_df()
     if not moves.empty:
+        start = datetime(day.year, day.month, day.day, 0, 0, 0)
+        end   = datetime(day.year, day.month, day.day, 23, 59, 59)
+
         mv = moves.copy()
         mv["ts_dt"] = pd.to_datetime(mv["ts"], errors="coerce")
         mv = mv[(mv["ts_dt"] >= start) & (mv["ts_dt"] <= end)].sort_values("ts_dt")
 
         prods = products_df().rename(columns={"name":"product_name","size":"product_size"})
-        custs = customers_df().rename(columns={"id":"cust_id","name":"customer_name"})
-        sups  = suppliers_df().rename(columns={"id":"sup_id","name":"supplier_name"})
+        custs = customers_df().rename(columns={"name":"customer_name"})
 
         rep = mv.merge(prods[["id","product_name","product_size","unit"]], left_on="product_id", right_on="id", how="left", suffixes=("","_p"))
-        rep = rep.merge(custs[["cust_id","customer_name"]], left_on="customer_id", right_on="cust_id", how="left")
-        rep = rep.merge(sups[["sup_id","supplier_name"]], left_on="supplier_id", right_on="sup_id", how="left")
-        rep["time"] = rep["ts_dt"].dt.strftime("%H:%M")
+        rep = rep.merge(custs[["id","customer_name"]], left_on="customer_id", right_on="id", how="left", suffixes=("","_c"))
+        rep = rep.sort_values("ts_dt")
+
+        rep["time"] = pd.to_datetime(rep["ts"]).dt.strftime("%H:%M")
         rep["qty_display"] = rep.apply(lambda r: f'{abs(r["qty"])} {r.get("unit","")}', axis=1)
         rep["value"] = rep.apply(lambda r: (abs(r["qty"]) * (r["price_per_unit"] or 0.0)), axis=1)
-        rep["Party"] = rep.apply(lambda r: r["customer_name"] if r["kind"]=="sale" else r.get("supplier_name"), axis=1)
 
-        st.markdown("#### Movements Today")
-        show = rep[["time","kind","product_name","product_size","qty_display","Party","price_per_unit","value","notes"]]
+        st.markdown("#### All Movements Today")
+        show = rep[["time","kind","product_name","product_size","qty_display","customer_name","price_per_unit","value","notes"]]
         show = show.rename(columns={
             "kind":"Type","product_name":"Product","product_size":"Size",
-            "price_per_unit":"Rate","value":"Amount","qty_display":"Qty"
+            "customer_name":"Customer","price_per_unit":"Rate","value":"Amount","qty_display":"Qty"
         })
         st.dataframe(show, use_container_width=True)
 
@@ -916,30 +713,30 @@ with tabs[6]:
 
         sales = rep[rep["kind"]=="sale"].copy()
         if not sales.empty:
-            st.markdown("#### Sales by Customer")
-            cust = sales.groupby("Party", dropna=False)["value"].sum().reset_index().rename(
-                columns={"Party":"Customer","value":"Total Amount"}
+            st.markdown("#### Who bought today (Sales by Customer)")
+            cust = sales.groupby("customer_name", dropna=False)["value"].sum().reset_index().rename(
+                columns={"customer_name":"Customer","value":"Total Amount"}
             )
             cust["Customer"] = cust["Customer"].fillna("N/A")
             st.dataframe(cust.sort_values("Customer"), use_container_width=True)
 
-    # Payments today
-    pays = payments_df()
-    if not pays.empty:
-        pp = pays.copy(); pp["ts_dt"] = pd.to_datetime(pp["ts"], errors="coerce")
-        pp = pp[(pp["ts_dt"] >= start) & (pp["ts_dt"] <= end)]
-        if not pp.empty:
-            cdf = customers_df().rename(columns={"id":"cid"})
-            pp = pp.merge(cdf[["cid","name"]], left_on="customer_id", right_on="cid", how="left")
-            pp["time"] = pp["ts_dt"].dt.strftime("%H:%M")
-            st.markdown("#### Payments / Advances Today")
-            st.dataframe(pp[["time","name","kind","amount","notes"]].rename(columns={"name":"Customer","amount":"Amount"}), use_container_width=True)
+        st.markdown("#### Stock Snapshot (End of Day)")
+        prods = list_products()
+        snap = []
+        for p in prods:
+            qty_left = product_stock(int(p["id"]))
+            snap.append({
+                "Product": p["name"], "Size": p.get("size"), "Unit": p["unit"],
+                "Stock Left": qty_left, "Status": "NEGATIVE ⚠️" if qty_left < 0 else ""
+            })
+        snap_df = pd.DataFrame(snap).sort_values(["Size","Product"], na_position="last")
+        st.dataframe(snap_df, use_container_width=True)
 
-    # End-of-day stock snapshot
-    prods2 = list_products()
-    snap = [{"Product": p["name"], "Size": p.get("size"), "Unit": p["unit"], "Stock Left": product_stock(int(p["id"])), "Status": "NEGATIVE ⚠️" if product_stock(int(p["id"])) < 0 else ""} for p in prods2]
-    st.markdown("#### Stock Snapshot (End of Day)")
-    st.dataframe(pd.DataFrame(snap).sort_values(["Size","Product"], na_position="last"), use_container_width=True)
+        if st.button(f"Export Today’s Report to CSV"):
+            show.to_csv(f"report_{day.isoformat()}.csv", index=False)
+            st.success(f"Saved as report_{day.isoformat()}.csv")
+    else:
+        st.info("No entries on this day yet.")
 
 st.divider()
 st.caption("Quick Bill uses a form that won’t refresh while typing. Click **Update Items** to apply changes. Per-row Amount and a grand Subtotal are shown for clarity.")
