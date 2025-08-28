@@ -230,33 +230,10 @@ def add_supplier(name, phone, address):
 
 def add_payment(customer_id: int, kind: str, amount: float, notes: str = None,
                 when: datetime | None = None, dedupe_window_seconds: int = 120) -> bool:
-    """Record payment/advance/opening_due into simple 6-col payments table."""
-    if not customer_id:
-        st.error("Payment must be linked to a customer.")
-        return False
-    if not amount or amount <= 0:
-        st.error("Amount must be greater than 0.")
+    if not customer_id or amount <= 0:
         return False
 
     ts_dt = (when or datetime.now())
-
-    # dedupe check
-    if dedupe_window_seconds and dedupe_window_seconds > 0:
-        since = ts_dt - timedelta(seconds=dedupe_window_seconds)
-        pay = payments_df()
-        if not pay.empty:
-            pay = pay.copy()
-            pay["ts_dt"] = pd.to_datetime(pay["ts"], errors="coerce")
-            mask = (
-                (pay["ts_dt"] >= since) &
-                (pd.to_numeric(pay["customer_id"], errors="coerce").fillna(-1).eq(int(customer_id))) &
-                (pd.to_numeric(pay["amount"], errors="coerce").eq(float(amount))) &
-                (pay["kind"].astype("string").fillna("").eq((kind or ""))) &
-                (pay["notes"].astype("string").fillna("").eq((notes or "")))
-            ).fillna(False)
-            if not pay[mask].empty:
-                return False
-
     new_id = _next_id("payments")
     ts = ts_dt.isoformat(timespec="seconds")
 
@@ -266,7 +243,8 @@ def add_payment(customer_id: int, kind: str, amount: float, notes: str = None,
             [new_id, ts, int(customer_id), str(kind), float(amount), (notes or None)]
         )
     except Exception as e:
-        raise RuntimeError(f"append_row failed for payments: {e}")
+        st.error(f"Supabase insert failed: {e}")   # <-- show actual error
+        return False
 
     _clear_caches()
     return True
