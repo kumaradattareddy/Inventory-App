@@ -9,15 +9,16 @@ except Exception:
     create_client = None
     Client = None  # type: ignore
 
-# ---- canonical, lowercase table names ----
-TABLE_COLUMNS: Dict[str, List[str]] = {
-    "users":       ["id", "username", "password_hash", "salt"],
-    "products":    ["id", "name", "material", "size", "unit", "opening_stock"],
-    "customers":   ["id", "name", "phone", "address"],
-    "suppliers":   ["id", "name", "phone", "address"],
-    "payments":    ["id", "ts", "customer_id", "kind", "amount", "notes"],
-    "stock_moves": ["id", "ts", "kind", "product_id", "qty", "price_per_unit", "customer_id", "supplier_id", "notes"],
+# --- Accept old TitleCase names but canonicalize to lowercase internally ---
+_TABLES_RAW: Dict[str, List[str]] = {
+    "Users":       ["id", "username", "password_hash", "salt"],
+    "Products":    ["id", "name", "material", "size", "unit", "opening_stock"],
+    "Customers":   ["id", "name", "phone", "address"],
+    "Suppliers":   ["id", "name", "phone", "address"],
+    "Payments":    ["id", "ts", "customer_id", "kind", "amount", "notes"],
+    "StockMoves":  ["id", "ts", "kind", "product_id", "qty", "price_per_unit", "customer_id", "supplier_id", "notes"],
 }
+TABLE_COLUMNS: Dict[str, List[str]] = {k.lower(): v for k, v in _TABLES_RAW.items()}
 
 _client_cache = None
 
@@ -25,7 +26,6 @@ def _norm_name(name: str) -> str:
     return (name or "").strip().lower()
 
 def _is_blank(v: Any) -> bool:
-    """NA-safe 'is empty' check."""
     if v is None:
         return True
     if isinstance(v, str) and v == "":
@@ -36,7 +36,6 @@ def _is_blank(v: Any) -> bool:
         return False
 
 def _noneify(v: Any):
-    """Convert pd.NA/NaN/'' to None to keep PostgREST happy."""
     try:
         if pd.isna(v):
             return None
@@ -47,9 +46,6 @@ def _noneify(v: Any):
     return v
 
 def _client():
-    """
-    Lazily create client using current env (so os.environ can be populated at runtime).
-    """
     global _client_cache
     if _client_cache is not None:
         return _client_cache
@@ -65,7 +61,6 @@ def ensure_all_tabs():
     try:
         sb = _client()
     except RuntimeError as e:
-        # credentials missing; just log
         print(f"[ensure_all_tabs] Skipped: {e}")
         return
     for t in TABLE_COLUMNS:
@@ -97,14 +92,11 @@ def fetch_df(table_name: str) -> pd.DataFrame:
         return pd.DataFrame(columns=TABLE_COLUMNS[t])
 
 def append_row(table_name: str, row_values: List[Any]) -> None:
-    """
-    Insert a single row. row_values must match the TABLE_COLUMNS order.
-    NA-safe handling for ids and other nullable fields.
-    """
+    """Insert a single row. row_values must match the TABLE_COLUMNS order."""
     t = _norm_name(table_name)
     if t not in TABLE_COLUMNS:
         raise ValueError(f"Unknown table: {table_name}")
-    sb = _client()  # let this raise if creds missing
+    sb = _client()
 
     cols = TABLE_COLUMNS[t]
     if len(row_values) != len(cols):
@@ -112,7 +104,7 @@ def append_row(table_name: str, row_values: List[Any]) -> None:
 
     rec = {c: _noneify(v) for c, v in zip(cols, row_values)}
 
-    # keep id clean (int or None)
+    # id must be int or None
     if "id" in rec and _is_blank(rec["id"]):
         rec["id"] = None
     elif "id" in rec and rec["id"] is not None:
