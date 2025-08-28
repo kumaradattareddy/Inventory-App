@@ -228,16 +228,8 @@ def add_supplier(name, phone, address):
     _clear_caches()
     return new_id
 
-def add_payment(
-    customer_id: int,
-    kind: str,
-    amount: float,
-    notes: str = None,
-    when: datetime | None = None,
-    method: str = "cash",   # default if not chosen
-    dedupe_window_seconds: int = 120
-) -> bool:
-    """Record payment/advance/opening_due. Maps legacy kind to direction & method."""
+def add_payment(customer_id: int, kind: str, amount: float, notes: str = None,
+                when: datetime | None = None, dedupe_window_seconds: int = 120) -> bool:
     if not customer_id or amount == 0:
         return False
     ts_dt = (when or datetime.now())
@@ -261,28 +253,7 @@ def add_payment(
 
     new_id = _next_id("payments")
     ts = ts_dt.isoformat(timespec="seconds")
-
-    # Map legacy kind to new schema
-    if kind in ("payment", "advance"):
-        direction = "in"
-    elif kind == "opening_due":
-        direction = "out"   # you may tweak depending on accounting style
-    else:
-        direction = "in"
-
-    append_row(
-        "payments",
-        [
-            new_id,
-            ts,
-            int(customer_id),    # maps to party_id
-            direction,
-            method,
-            float(amount),
-            None,                # instrument_ref (not used yet)
-            (notes or None),
-        ],
-    )
+    append_row("payments", [new_id, ts, int(customer_id), kind, float(amount), (notes or None)])
     _clear_caches()
     return True
 
