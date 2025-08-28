@@ -50,14 +50,23 @@ def _noneify(v: Any):
 def _client():
     """
     Lazily create client using current env (so os.environ can be populated at runtime).
+    Accepts SUPABASE_KEY, SUPABASE_ANON_KEY, or SUPABASE_SERVICE_ROLE_KEY.
     """
     global _client_cache
     if _client_cache is not None:
         return _client_cache
+
     url = os.getenv("SUPABASE_URL", "")
-    key = os.getenv("SUPABASE_KEY", "")
+    key = (
+        os.getenv("SUPABASE_KEY")
+        or os.getenv("SUPABASE_ANON_KEY")
+        or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        or ""
+    )
+
     if not create_client or not url or not key:
         raise RuntimeError("Supabase credentials not configured (SUPABASE_URL / SUPABASE_KEY).")
+
     _client_cache = create_client(url, key)
     return _client_cache
 

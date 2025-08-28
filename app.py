@@ -18,10 +18,18 @@ DEFAULT_PASSWORD = "1234"
 
 # ---------- Load Supabase creds from Streamlit secrets if present ----------
 try:
-    if "SUPABASE_URL" in st.secrets and "SUPABASE_KEY" in st.secrets:
-        os.environ.setdefault("SUPABASE_URL", st.secrets["SUPABASE_URL"])
-        os.environ.setdefault("SUPABASE_KEY", st.secrets["SUPABASE_KEY"])
+    url = st.secrets.get("SUPABASE_URL")
+    key = (
+        st.secrets.get("SUPABASE_KEY")
+        or st.secrets.get("SUPABASE_ANON_KEY")
+        or st.secrets.get("SUPABASE_SERVICE_ROLE_KEY")
+    )
+    if url and key:
+        os.environ["SUPABASE_URL"] = url
+        # normalize to SUPABASE_KEY so the db layer finds it
+        os.environ["SUPABASE_KEY"] = key
 except Exception:
+    # secrets might not be available locally; that's fine
     pass
 
 # ---------- Styling ----------
@@ -36,7 +44,7 @@ label { font-size: 18px !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ---- scheduled widget resets ----
+# ---- scheduled widget resets (prevents "cannot be modified after widget..." error) ----
 def _apply_scheduled_resets():
     keys = st.session_state.pop("_reset_keys", None)
     if keys:
