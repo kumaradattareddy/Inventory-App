@@ -238,6 +238,7 @@ def add_payment(customer_id: int, kind: str, amount: float, notes: str = None,
 
     try:
         append_row("payments", [
+            None,                # let Postgres auto-generate id
             ts,
             int(customer_id),
             str(kind),
