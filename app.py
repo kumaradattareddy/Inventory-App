@@ -234,16 +234,18 @@ def add_payment(customer_id: int, kind: str, amount: float, notes: str = None,
         return False
 
     ts_dt = (when or datetime.now())
-    new_id = _next_id("payments")
     ts = ts_dt.isoformat(timespec="seconds")
 
     try:
-        append_row(
-            "payments",
-            [new_id, ts, int(customer_id), str(kind), float(amount), (notes or None)]
-        )
+        append_row("payments", [
+            ts,
+            int(customer_id),
+            str(kind),
+            float(amount),
+            (notes or None)
+        ])
     except Exception as e:
-        st.error(f"Supabase insert failed: {e}")   # <-- show actual error
+        st.error(f"Supabase insert failed: {e}")
         return False
 
     _clear_caches()
