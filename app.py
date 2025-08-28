@@ -725,10 +725,20 @@ with tabs[3]:
                     st.info(f"**Prev. balance for {sel}: ₹ {prev_bal:,.2f} (due)**")
                 else:
                     st.success(f"**Advance available for {sel}: ₹ {abs(prev_bal):,.2f}**")
-                adv_now = st.number_input("Advance received now (optional)", min_value=0.0, step=100.0, value=0.0, key="sale_adv")
+
+                # 👉 Plain textbox instead of number_input
+                adv_now_text = st.text_input(
+                    "Advance received now (optional)",
+                    value="0.00",
+                    key="sale_adv"
+                )
+                try:
+                    adv_now = float(adv_now_text.strip() or 0)
+                except ValueError:
+                    adv_now = 0.0
 
         notes = st.text_input("Bill / Invoice No. or Notes", key="sale_notes", placeholder="Invoice no / remarks")
-        line_total = float(qty_text or 0)*float(price_text or 0)
+        line_total = float(qty_text or 0) * float(price_text or 0)
         st.markdown(f"<div class='amount'>Line Total: ₹ {line_total:,.2f}</div>", unsafe_allow_html=True)
 
         if customer_id:
@@ -745,11 +755,14 @@ with tabs[3]:
                               customer_id=customer_id, notes=notes or None)
                 if ok:
                     if customer_id and float(adv_now or 0) > 0:
-                        add_payment(customer_id, "payment", float(adv_now), notes=f"Advance for {notes}" if notes else "Advance")
+                        add_payment(
+                            customer_id, "payment", float(adv_now),
+                            notes=f"Advance for {notes}" if notes else "Advance"
+                        )
                     st.success("Sale saved.")
                 else:
                     st.warning("Skipped duplicate sale (same line recently saved).")
-                _schedule_reset("sale_qty","sale_price","sale_notes","sale_customer","sale_adv")
+                _schedule_reset("sale_qty", "sale_price", "sale_notes", "sale_customer", "sale_adv")
                 st.rerun()
 
         if stock_now < 0:
@@ -770,10 +783,21 @@ with tabs[3]:
         if not row.empty:
             cust_preview_id = int(row.iloc[0]["id"])
             bal = customer_balance(cust_preview_id)
-            if bal >= 0: st.info(f"Prev. balance: ₹ {bal:,.2f}")
-            else:       st.success(f"Advance available: ₹ {abs(bal):,.2f}")
+            if bal >= 0:
+                st.info(f"Prev. balance: ₹ {bal:,.2f}")
+            else:
+                st.success(f"Advance available: ₹ {abs(bal):,.2f}")
 
-    bill_adv = st.number_input("Advance received now for this bill (optional)", min_value=0.0, step=100.0, value=0.0, key="sale_bill_adv")
+    # 👉 Plain textbox instead of number_input
+    bill_adv_text = st.text_input(
+        "Advance received now for this bill (optional)",
+        value="0.00",
+        key="sale_bill_adv"
+    )
+    try:
+        bill_adv = float(bill_adv_text.strip() or 0)
+    except ValueError:
+        bill_adv = 0.0
 
     rows_out, subtotal_out = row_form("rows_sale", "Items")
     if cust_preview_id is not None:
@@ -785,11 +809,12 @@ with tabs[3]:
             def first_non_blank(items, key, fallback):
                 for r in items:
                     v = (r.get(key) or "").strip()
-                    if v: return v
+                    if v:
+                        return v
                 return fallback
 
             unit_default = first_non_blank(rows_out, "unit", "box")
-            mat_default  = first_non_blank(rows_out, "material", "Tiles")
+            mat_default = first_non_blank(rows_out, "material", "Tiles")
             cust_id = ensure_customer_by_name(cust_out_name)
 
             saved = 0
@@ -798,7 +823,7 @@ with tabs[3]:
                 size = (ln.get("size") or "").strip()
                 if not name or not size:
                     continue
-                qty  = float(ln.get("qty") or 0)
+                qty = float(ln.get("qty") or 0)
                 rate = float(ln.get("rate") or 0)
                 unit = (ln.get("unit") or unit_default).strip()
                 material = (ln.get("material") or mat_default).strip()
@@ -812,16 +837,18 @@ with tabs[3]:
 
             adv_msg = ""
             if cust_id and float(bill_adv or 0) > 0:
-                if add_payment(cust_id, "payment", float(bill_adv),
-                               notes=f"Advance for Bill {bill_no_out}" if bill_no_out else "Advance for bill"):
+                if add_payment(
+                    cust_id, "payment", float(bill_adv),
+                    notes=f"Advance for Bill {bill_no_out}" if bill_no_out else "Advance for bill"
+                ):
                     adv_msg = f" & recorded advance ₹{float(bill_adv):,.2f}"
 
             if saved:
                 st.success(f"Saved {saved} sale line(s){adv_msg}.")
                 st.session_state["rows_sale"] = [
-                    {"material":"","product_name":"","size":"","unit":"","qty":"","rate":""} for _ in range(6)
+                    {"material": "", "product_name": "", "size": "", "unit": "", "qty": "", "rate": ""} for _ in range(6)
                 ]
-                _schedule_reset("bill_no_out","customer_out","sale_bill_adv")
+                _schedule_reset("bill_no_out", "customer_out", "sale_bill_adv")
                 st.rerun()
             else:
                 st.warning("Nothing to save. Fill at least Product, Size and Qty > 0.")
