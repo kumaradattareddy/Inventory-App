@@ -59,14 +59,14 @@ except RuntimeError as e:
 # ===================== Cached reads =====================
 @st.cache_data(ttl=12, show_spinner=False)
 def users_df():
-    df = fetch_df("Users")
+    df = fetch_df("users")
     if not df.empty:
         df["id"] = pd.to_numeric(df["id"], errors="coerce").astype("Int64")
     return df
 
 @st.cache_data(ttl=12, show_spinner=False)
 def products_df():
-    df = fetch_df("Products")
+    df = fetch_df("products")
     if not df.empty:
         df["id"] = pd.to_numeric(df["id"], errors="coerce").astype("Int64")
         df["opening_stock"] = pd.to_numeric(df["opening_stock"], errors="coerce").fillna(0.0)
@@ -74,21 +74,21 @@ def products_df():
 
 @st.cache_data(ttl=12, show_spinner=False)
 def customers_df():
-    df = fetch_df("Customers")
+    df = fetch_df("customers")
     if not df.empty:
         df["id"] = pd.to_numeric(df["id"], errors="coerce").astype("Int64")
     return df
 
 @st.cache_data(ttl=12, show_spinner=False)
 def suppliers_df():
-    df = fetch_df("Suppliers")
+    df = fetch_df("suppliers")
     if not df.empty:
         df["id"] = pd.to_numeric(df["id"], errors="coerce").astype("Int64")
     return df
 
 @st.cache_data(ttl=12, show_spinner=False)
 def payments_df():
-    df = fetch_df("Payments")
+    df = fetch_df("payments")
     if not df.empty:
         df["id"] = pd.to_numeric(df["id"], errors="coerce").astype("Int64")
         df["customer_id"] = pd.to_numeric(df["customer_id"], errors="coerce").astype("Int64")
@@ -97,7 +97,7 @@ def payments_df():
 
 @st.cache_data(ttl=12, show_spinner=False)
 def stock_moves_df():
-    df = fetch_df("StockMoves")
+    df = fetch_df("stock_moves")
     if not df.empty:
         for col in ["id", "product_id", "customer_id", "supplier_id"]:
             df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
@@ -130,8 +130,8 @@ def user_exists(username: str) -> bool:
 def create_user(username: str, password: str):
     salt = secrets.token_hex(16)
     pwd_hash = _hash_password(password, salt)
-    new_id = _next_id("Users")
-    append_row("Users", [new_id, username.strip().lower(), pwd_hash, salt])
+    new_id = _next_id("users")
+    append_row("users", [new_id, username.strip().lower(), pwd_hash, salt])
     _clear_caches()
 
 def verify_login(username: str, password: str):
@@ -187,8 +187,8 @@ def product_stock(product_id: int) -> float:
     return float(opening) + s
 
 def add_product(name, material, size, unit, opening_stock):
-    new_id = _next_id("Products")
-    append_row("Products", [
+    new_id = _next_id("products")
+    append_row("products", [
         new_id,
         (name or "").strip(),
         (material or "").strip() or None,
@@ -200,8 +200,8 @@ def add_product(name, material, size, unit, opening_stock):
     return new_id
 
 def add_customer(name, phone, address):
-    new_id = _next_id("Customers")
-    append_row("Customers", [
+    new_id = _next_id("customers")
+    append_row("customers", [
         new_id,
         (name or "").strip(),
         (phone or "").strip() or None,
@@ -211,8 +211,8 @@ def add_customer(name, phone, address):
     return new_id
 
 def add_supplier(name, phone, address):
-    new_id = _next_id("Suppliers")
-    append_row("Suppliers", [
+    new_id = _next_id("suppliers")
+    append_row("suppliers", [
         new_id,
         (name or "").strip(),
         (phone or "").strip() or None,
@@ -244,9 +244,9 @@ def add_payment(customer_id: int, kind: str, amount: float, notes: str = None,
             dup = pay[mask]
             if not dup.empty:
                 return False
-    new_id = _next_id("Payments")
+    new_id = _next_id("payments")
     ts = ts_dt.isoformat(timespec="seconds")
-    append_row("Payments", [new_id, ts, int(customer_id), kind, float(amount), (notes or None)])
+    append_row("payments", [new_id, ts, int(customer_id), kind, float(amount), (notes or None)])
     _clear_caches()
     return True
 
@@ -282,9 +282,9 @@ def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, suppl
             if not dup.empty:
                 return False
 
-    new_id = _next_id("StockMoves")
+    new_id = _next_id("stock_moves")
     ts = ts_dt.isoformat(timespec="seconds")
-    append_row("StockMoves", [
+    append_row("stock_moves", [
         new_id, ts, kind, int(product_id), float(ins_qty),
         (float(price_per_unit) if price_per_unit not in (None, "") else None),
         (int(customer_id) if customer_id not in (None, "") else None),
