@@ -10,21 +10,48 @@ except Exception:
     create_client = None
     Client = None  # type: ignore
 
-# --- Accept old TitleCase names but canonicalize to lowercase internally ---
-_TABLES_RAW: Dict[str, List[str]] = {
-    "Users":       ["id", "username", "password_hash", "salt"],
-    "Products":    ["id", "name", "material", "size", "unit", "opening_stock"],
-    "Customers":   ["id", "name", "phone", "address"],
-    "Suppliers":   ["id", "name", "phone", "address"],
-    "Payments":    ["id", "ts", "customer_id", "kind", "amount", "notes"],
-    "StockMoves":  ["id", "ts", "kind", "product_id", "qty", "price_per_unit", "customer_id", "supplier_id", "notes"],
+# === Canonical table schemas (match your Postgres table names exactly) ===
+TABLE_COLUMNS: Dict[str, List[str]] = {
+    "users":       ["id", "username", "password_hash", "salt"],
+    "products":    ["id", "name", "material", "size", "unit", "opening_stock"],
+    "customers":   ["id", "name", "phone", "address"],
+    "suppliers":   ["id", "name", "phone", "address"],
+    "payments":    ["id", "ts", "customer_id", "kind", "amount", "notes"],
+    "stock_moves": ["id", "ts", "kind", "product_id", "qty", "price_per_unit", "customer_id", "supplier_id", "notes"],
 }
-TABLE_COLUMNS: Dict[str, List[str]] = {k.lower(): v for k, v in _TABLES_RAW.items()}
+
+# Allow legacy names / variants (TitleCase, no-underscore, etc.)
+SYNONYMS: Dict[str, list[str]] = {
+    "users":       ["Users"],
+    "products":    ["Products"],
+    "customers":   ["Customers"],
+    "suppliers":   ["Suppliers"],
+    "payments":    ["Payments"],
+    "stock_moves": ["StockMoves", "stockmoves", "stock-moves"],
+}
 
 _client_cache = None
 
 def _norm_name(name: str) -> str:
     return (name or "").strip().lower()
+
+def _canon(name: str) -> str:
+    """
+    Map any incoming table name to one of the canonical keys in TABLE_COLUMNS.
+    Accepts TitleCase and underscoreless forms, e.g. 'StockMoves' or 'stockmoves'.
+    """
+    n = _norm_name(name)
+    if n in TABLE_COLUMNS:
+        return n
+    compact = n.replace("_", "").replace("-", "")
+    # check synonyms (+ compact match)
+    for canon, alts in SYNONYMS.items():
+        all_names = [canon] + alts
+        for a in all_names:
+            a_norm = _norm_name(a)
+            if n == a_norm or compact == a_norm.replace("_", "").replace("-", ""):
+                return canon
+    raise ValueError(f"Unknown table: {name}")
 
 def _is_blank(v: Any) -> bool:
     if v is None:
@@ -77,16 +104,14 @@ def ensure_all_tabs():
     except RuntimeError as e:
         print(f"[ensure_all_tabs] Skipped: {e}")
         return
-    for t in TABLE_COLUMNS:
+    for canon in TABLE_COLUMNS.keys():
         try:
-            _ = sb.table(_norm_name(t)).select("*").limit(1).execute()
+            _ = sb.table(canon).select("*").limit(1).execute()
         except Exception as e:
-            print(f"[ensure_all_tabs] Warning touching table {t}: {e}")
+            print(f"[ensure_all_tabs] Warning touching table {canon}: {e}")
 
 def fetch_df(table_name: str) -> pd.DataFrame:
-    t = _norm_name(table_name)
-    if t not in TABLE_COLUMNS:
-        raise ValueError(f"Unknown table: {table_name}")
+    t = _canon(table_name)
     try:
         sb = _client()
     except RuntimeError as e:
@@ -110,9 +135,7 @@ def append_row(table_name: str, row_values: List[Any]) -> None:
     Insert a single row. row_values must match the TABLE_COLUMNS order.
     NA-safe handling for ids and other nullable fields.
     """
-    t = _norm_name(table_name)
-    if t not in TABLE_COLUMNS:
-        raise ValueError(f"Unknown table: {table_name}")
+    t = _canon(table_name)
     sb = _client()  # let this raise if creds missing
 
     cols = TABLE_COLUMNS[t]
@@ -138,7 +161,7 @@ def append_row(table_name: str, row_values: List[Any]) -> None:
 # ---------- helpers used by the login reset button ----------
 def _next_id(table_name: str) -> int:
     """Find next id for a table (works even if id isn't SERIAL)."""
-    t = _norm_name(table_name)
+    t = _canon(table_name)
     sb = _client()
     try:
         resp = sb.table(t).select("id").order("id", desc=True).limit(1).execute()
