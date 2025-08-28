@@ -228,12 +228,20 @@ def add_supplier(name, phone, address):
     _clear_caches()
     return new_id
 
-def add_payment(customer_id: int, kind: str, amount: float, notes: str = None,
-                when: datetime | None = None, dedupe_window_seconds: int = 120) -> bool:
-    """Record payment/advance/opening_due. Positive amount for payment/advance; opening_due is also positive here."""
+def add_payment(
+    customer_id: int,
+    kind: str,
+    amount: float,
+    notes: str = None,
+    when: datetime | None = None,
+    method: str = "cash",   # default if not chosen
+    dedupe_window_seconds: int = 120
+) -> bool:
+    """Record payment/advance/opening_due. Maps legacy kind to direction & method."""
     if not customer_id or amount == 0:
         return False
     ts_dt = (when or datetime.now())
+
     # dedupe
     if dedupe_window_seconds and dedupe_window_seconds > 0:
         since = ts_dt - timedelta(seconds=dedupe_window_seconds)
@@ -248,14 +256,36 @@ def add_payment(customer_id: int, kind: str, amount: float, notes: str = None,
                 (pay["kind"].astype("string").fillna("").eq((kind or ""))) &
                 (pay["notes"].astype("string").fillna("").eq((notes or "")))
             ).fillna(False)
-            dup = pay[mask]
-            if not dup.empty:
+            if not pay[mask].empty:
                 return False
+
     new_id = _next_id("payments")
     ts = ts_dt.isoformat(timespec="seconds")
-    append_row("payments", [new_id, ts, int(customer_id), kind, float(amount), (notes or None)])
+
+    # Map legacy kind to new schema
+    if kind in ("payment", "advance"):
+        direction = "in"
+    elif kind == "opening_due":
+        direction = "out"   # you may tweak depending on accounting style
+    else:
+        direction = "in"
+
+    append_row(
+        "payments",
+        [
+            new_id,
+            ts,
+            int(customer_id),    # maps to party_id
+            direction,
+            method,
+            float(amount),
+            None,                # instrument_ref (not used yet)
+            (notes or None),
+        ],
+    )
     _clear_caches()
     return True
+
 
 def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, supplier_id=None, notes=None,
              when: datetime | None = None, dedupe_window_seconds: int = 120) -> bool:
