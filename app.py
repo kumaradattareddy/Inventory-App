@@ -380,6 +380,19 @@ def _to_float(txt: str) -> float:
         return float(s)
     except:
         return 0.0
+# ---- Helper for safe amount parsing ----
+def parse_amount(txt: str) -> float | None:
+    """
+    Convert a string like '1000.50' or '1,000.50' to float.
+    Returns None if invalid.
+    """
+    txt = (txt or "").strip()
+    if not txt:
+        return 0.0
+    try:
+        return float(txt.replace(",", ""))
+    except ValueError:
+        return None
 
 # ===================== UI =====================
 st.title("Tiles & Granite Inventory")
@@ -726,15 +739,10 @@ with tabs[3]:
                 else:
                     st.success(f"**Advance available for {sel}: ₹ {abs(prev_bal):,.2f}**")
 
-                # 👉 Plain textbox instead of number_input
-                adv_now_text = st.text_input(
-                    "Advance received now (optional)",
-                    value="0.00",
-                    key="sale_adv"
-                )
-                try:
-                    adv_now = float(adv_now_text.strip() or 0)
-                except ValueError:
+                adv_now_text = st.text_input("Advance received now (optional)", value="0.00", key="sale_adv")
+                adv_now = parse_amount(adv_now_text)
+                if adv_now is None:
+                    st.error("Please enter a valid advance amount (e.g., 1000 or 1000.50)")
                     adv_now = 0.0
 
         notes = st.text_input("Bill / Invoice No. or Notes", key="sale_notes", placeholder="Invoice no / remarks")
@@ -754,7 +762,7 @@ with tabs[3]:
                 ok = add_move("sale", int(p["id"]), qty, price_per_unit=(price or None),
                               customer_id=customer_id, notes=notes or None)
                 if ok:
-                    if customer_id and float(adv_now or 0) > 0:
+                    if customer_id and adv_now and adv_now > 0:
                         add_payment(
                             customer_id, "payment", float(adv_now),
                             notes=f"Advance for {notes}" if notes else "Advance"
@@ -775,7 +783,6 @@ with tabs[3]:
     bill_no_out = st.text_input("Bill / Invoice No. (optional)", key="bill_no_out")
     cust_out_name = st.text_input("Customer Name (optional)", key="customer_out")
 
-    # Balance preview if existing customer typed
     cust_preview_id = None
     cdf = customers_df()
     if not cdf.empty and (cust_out_name or "").strip():
@@ -788,15 +795,10 @@ with tabs[3]:
             else:
                 st.success(f"Advance available: ₹ {abs(bal):,.2f}")
 
-    # 👉 Plain textbox instead of number_input
-    bill_adv_text = st.text_input(
-        "Advance received now for this bill (optional)",
-        value="0.00",
-        key="sale_bill_adv"
-    )
-    try:
-        bill_adv = float(bill_adv_text.strip() or 0)
-    except ValueError:
+    bill_adv_text = st.text_input("Advance received now for this bill (optional)", value="0.00", key="sale_bill_adv")
+    bill_adv = parse_amount(bill_adv_text)
+    if bill_adv is None:
+        st.error("Please enter a valid advance amount for this bill")
         bill_adv = 0.0
 
     rows_out, subtotal_out = row_form("rows_sale", "Items")
@@ -836,7 +838,7 @@ with tabs[3]:
                     saved += 1
 
             adv_msg = ""
-            if cust_id and float(bill_adv or 0) > 0:
+            if cust_id and bill_adv and bill_adv > 0:
                 if add_payment(
                     cust_id, "payment", float(bill_adv),
                     notes=f"Advance for Bill {bill_no_out}" if bill_no_out else "Advance for bill"
@@ -854,6 +856,7 @@ with tabs[3]:
                 st.warning("Nothing to save. Fill at least Product, Size and Qty > 0.")
         except Exception as e:
             st.error(f"Error: {e}")
+
 
 # ===================== Payments & Balances =====================
 with tabs[4]:
@@ -877,11 +880,10 @@ with tabs[4]:
             horizontal=True
         )
 
-        # 👉 Plain textbox for amount
         amt_text = st.text_input("Amount", value="0.00", key="pay_amt")
-        try:
-            amt = float(amt_text.strip() or 0)
-        except ValueError:
+        amt = parse_amount(amt_text)
+        if amt is None:
+            st.error("Please enter a valid number for amount (e.g., 1000 or 1000.50)")
             amt = 0.0
 
         note = st.text_input("Notes", key="pay_note")
@@ -893,8 +895,8 @@ with tabs[4]:
         }[mode]
 
         if st.button("Save"):
-            if amt == 0:
-                st.warning("Amount cannot be 0.")
+            if amt is None or amt == 0:
+                st.warning("Amount must be a valid number and > 0.")
             else:
                 if add_payment(cid, kind, float(amt), notes=note):
                     nb = customer_balance(cid)
@@ -923,13 +925,12 @@ with tabs[4]:
     st.subheader("Payments Ledger (All)")
     pays = payments_df()
     if not pays.empty and not cdf.empty:
-        merged = pays.merge(cdf[["id","name"]], left_on="customer_id", right_on="id", how="left")
-        merged = merged.rename(columns={"name":"Customer"})
+        merged = pays.merge(cdf[["id", "name"]], left_on="customer_id", right_on="id", how="left")
+        merged = merged.rename(columns={"name": "Customer"})
         merged = merged.sort_values("ts")
-        st.dataframe(merged[["ts","Customer","kind","amount","notes"]], use_container_width=True)
+        st.dataframe(merged[["ts", "Customer", "kind", "amount", "notes"]], use_container_width=True)
     elif pays.empty:
         st.info("No payments yet.")
-
 
 # ===================== Daily Report =====================
 with tabs[6]:
