@@ -871,11 +871,26 @@ with tabs[4]:
         else:
             st.success(f"Advance credit: ₹ {abs(cur_bal):,.2f}")
 
-        mode = st.radio("What are you recording?", ["Payment received", "Opening due (+due)", "Advance (credit)"], horizontal=True)
-        amt = st.number_input("Amount", min_value=0.0, step=100.0, value=0.0, key="pay_amt")
+        mode = st.radio(
+            "What are you recording?",
+            ["Payment received", "Opening due (+due)", "Advance (credit)"],
+            horizontal=True
+        )
+
+        # 👉 Plain textbox for amount
+        amt_text = st.text_input("Amount", value="0.00", key="pay_amt")
+        try:
+            amt = float(amt_text.strip() or 0)
+        except ValueError:
+            amt = 0.0
+
         note = st.text_input("Notes", key="pay_note")
 
-        kind = {"Payment received":"payment", "Opening due (+due)":"opening_due", "Advance (credit)":"advance"}[mode]
+        kind = {
+            "Payment received": "payment",
+            "Opening due (+due)": "opening_due",
+            "Advance (credit)": "advance"
+        }[mode]
 
         if st.button("Save"):
             if amt == 0:
@@ -883,8 +898,12 @@ with tabs[4]:
             else:
                 if add_payment(cid, kind, float(amt), notes=note):
                     nb = customer_balance(cid)
-                    st.success(f"Saved. New balance: ₹ {nb:,.2f}" if nb >= 0 else f"Saved. Advance: ₹ {abs(nb):,.2f}")
-                    _schedule_reset("pay_amt","pay_note"); st.rerun()
+                    if nb >= 0:
+                        st.success(f"Saved. New balance: ₹ {nb:,.2f}")
+                    else:
+                        st.success(f"Saved. Advance: ₹ {abs(nb):,.2f}")
+                    _schedule_reset("pay_amt", "pay_note")
+                    st.rerun()
                 else:
                     st.warning("Looks like a duplicate; nothing saved.")
 
@@ -894,7 +913,8 @@ with tabs[4]:
     if not cdf.empty:
         rows = []
         for _, r in cdf.iterrows():
-            cid = int(r["id"]); bal = customer_balance(cid)
+            cid = int(r["id"])
+            bal = customer_balance(cid)
             rows.append({"Customer": r["name"], "Phone": r["phone"], "Balance (+due / −adv)": bal})
         bal_df = pd.DataFrame(rows).sort_values("Customer")
         st.dataframe(bal_df, use_container_width=True)
@@ -910,33 +930,6 @@ with tabs[4]:
     elif pays.empty:
         st.info("No payments yet.")
 
-# ===================== Stock & Low Stock =====================
-with tabs[5]:
-    st.subheader("Stock Levels")
-    prods = list_products()
-    if prods:
-        df = pd.DataFrame(prods)
-        df["current_stock"] = df["id"].astype(int).apply(product_stock)
-        df["status"] = df["current_stock"].apply(lambda x: "NEGATIVE ⚠️" if x < 0 else "")
-        low_thr = st.number_input("Low stock threshold (show items below this)", min_value=0.0, step=1.0, value=10.0)
-
-        view = df[["name","material","size","unit","current_stock","status"]].sort_values(["size","name"], na_position="last")
-        st.dataframe(view, use_container_width=True)
-
-        low = df[df["current_stock"] < low_thr]
-        st.markdown("#### ⚠️ Low Stock Items")
-        if low.empty:
-            st.success("All good. No low stock items.")
-        else:
-            st.dataframe(low[["name","size","unit","current_stock"]].sort_values(["size","name"], na_position="last"),
-                         use_container_width=True)
-
-        if st.button("Export Stock to CSV"):
-            out = df[["name","material","size","unit","current_stock"]].copy().sort_values(["size","name"], na_position="last")
-            out.to_csv("stock_export.csv", index=False)
-            st.success("Saved as stock_export.csv (in the same folder).")
-    else:
-        st.info("No products yet.")
 
 # ===================== Daily Report =====================
 with tabs[6]:
