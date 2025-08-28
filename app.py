@@ -230,11 +230,17 @@ def add_supplier(name, phone, address):
 
 def add_payment(customer_id: int, kind: str, amount: float, notes: str = None,
                 when: datetime | None = None, dedupe_window_seconds: int = 120) -> bool:
-    if not customer_id or amount == 0:
+    """Record payment/advance/opening_due into simple 6-col payments table."""
+    if not customer_id:
+        st.error("Payment must be linked to a customer.")
         return False
+    if not amount or amount <= 0:
+        st.error("Amount must be greater than 0.")
+        return False
+
     ts_dt = (when or datetime.now())
 
-    # dedupe
+    # dedupe check
     if dedupe_window_seconds and dedupe_window_seconds > 0:
         since = ts_dt - timedelta(seconds=dedupe_window_seconds)
         pay = payments_df()
@@ -253,7 +259,15 @@ def add_payment(customer_id: int, kind: str, amount: float, notes: str = None,
 
     new_id = _next_id("payments")
     ts = ts_dt.isoformat(timespec="seconds")
-    append_row("payments", [new_id, ts, int(customer_id), kind, float(amount), (notes or None)])
+
+    try:
+        append_row(
+            "payments",
+            [new_id, ts, int(customer_id), str(kind), float(amount), (notes or None)]
+        )
+    except Exception as e:
+        raise RuntimeError(f"append_row failed for payments: {e}")
+
     _clear_caches()
     return True
 
