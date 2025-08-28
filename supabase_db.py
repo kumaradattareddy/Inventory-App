@@ -1,6 +1,7 @@
 # supabase_db.py — thin Supabase wrapper used by app.py
 import os
 import pandas as pd
+import hashlib, secrets
 from typing import List, Dict, Any
 
 try:
@@ -36,6 +37,7 @@ def _is_blank(v: Any) -> bool:
         return False
 
 def _noneify(v: Any):
+    """Convert pd.NA/NaN/'' to None to keep PostgREST happy."""
     try:
         if pd.isna(v):
             return None
@@ -46,6 +48,9 @@ def _noneify(v: Any):
     return v
 
 def _client():
+    """
+    Lazily create client using current env (so os.environ can be populated at runtime).
+    """
     global _client_cache
     if _client_cache is not None:
         return _client_cache
@@ -92,11 +97,14 @@ def fetch_df(table_name: str) -> pd.DataFrame:
         return pd.DataFrame(columns=TABLE_COLUMNS[t])
 
 def append_row(table_name: str, row_values: List[Any]) -> None:
-    """Insert a single row. row_values must match the TABLE_COLUMNS order."""
+    """
+    Insert a single row. row_values must match the TABLE_COLUMNS order.
+    NA-safe handling for ids and other nullable fields.
+    """
     t = _norm_name(table_name)
     if t not in TABLE_COLUMNS:
         raise ValueError(f"Unknown table: {table_name}")
-    sb = _client()
+    sb = _client()  # let this raise if creds missing
 
     cols = TABLE_COLUMNS[t]
     if len(row_values) != len(cols):
@@ -104,7 +112,7 @@ def append_row(table_name: str, row_values: List[Any]) -> None:
 
     rec = {c: _noneify(v) for c, v in zip(cols, row_values)}
 
-    # id must be int or None
+    # keep id clean (int or None)
     if "id" in rec and _is_blank(rec["id"]):
         rec["id"] = None
     elif "id" in rec and rec["id"] is not None:
@@ -117,3 +125,45 @@ def append_row(table_name: str, row_values: List[Any]) -> None:
         _ = sb.table(t).insert(rec).execute()
     except Exception as e:
         raise RuntimeError(f"append_row failed for {t}: {e}") from e
+
+# ---------- helpers used by the login reset button ----------
+def _next_id(table_name: str) -> int:
+    """Find next id for a table (works even if id isn't SERIAL)."""
+    t = _norm_name(table_name)
+    sb = _client()
+    try:
+        resp = sb.table(t).select("id").order("id", desc=True).limit(1).execute()
+        if resp.data and resp.data[0].get("id") is not None:
+            return int(resp.data[0]["id"]) + 1
+    except Exception:
+        pass
+    return 1
+
+def reset_or_create_user(username: str, password: str) -> None:
+    """
+    Ensure a user row exists for `username` with PBKDF2(password, salt, 100k).
+    If the user exists → UPDATE salt/hash. Otherwise → INSERT a new row.
+    """
+    t = "users"
+    sb = _client()
+    u = (username or "").strip().lower()
+
+    salt = secrets.token_hex(16)
+    pwd_hash = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), 100_000).hex()
+
+    # Try update first
+    try:
+        resp = sb.table(t).update({"salt": salt, "password_hash": pwd_hash}).eq("username", u).execute()
+        if getattr(resp, "data", None):  # updated existing row
+            return
+    except Exception:
+        pass
+
+    # Insert if missing
+    new_id = _next_id(t)
+    sb.table(t).insert({
+        "id": new_id,
+        "username": u,
+        "salt": salt,
+        "password_hash": pwd_hash
+    }).execute()

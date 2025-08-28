@@ -5,7 +5,7 @@ import streamlit as st
 import hashlib, secrets
 from datetime import date, datetime, timedelta
 
-from supabase_db import ensure_all_tabs, fetch_df, append_row
+from supabase_db import ensure_all_tabs, fetch_df, append_row, reset_or_create_user
 
 # ===================== App Config / Auth =====================
 st.set_page_config(page_title="Tiles & Granite Inventory", layout="wide")
@@ -22,7 +22,6 @@ try:
         os.environ.setdefault("SUPABASE_URL", st.secrets["SUPABASE_URL"])
         os.environ.setdefault("SUPABASE_KEY", st.secrets["SUPABASE_KEY"])
 except Exception:
-    # secrets might not be available locally; that's fine
     pass
 
 # ---------- Styling ----------
@@ -37,7 +36,7 @@ label { font-size: 18px !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ---- scheduled widget resets (prevents "cannot be modified after widget..." error) ----
+# ---- scheduled widget resets ----
 def _apply_scheduled_resets():
     keys = st.session_state.pop("_reset_keys", None)
     if keys:
@@ -149,7 +148,7 @@ def verify_login(username: str, password: str):
         return {"username": row["username"]}
     return None
 
-# Ensure default user exists
+# Try to ensure default user exists (best-effort)
 if DEFAULT_USERNAME in ALLOWED_USERS and not user_exists(DEFAULT_USERNAME):
     try:
         create_user(DEFAULT_USERNAME, DEFAULT_PASSWORD)
@@ -382,13 +381,25 @@ if "user" not in st.session_state:
     with st.expander("🔐 Login", expanded=True):
         u = st.text_input("Username")
         p = st.text_input("Password", type="password")
-        if st.button("Login"):
-            user = verify_login(u, p)
-            if user:
-                st.session_state.user = user
-                st.rerun()
-            else:
-                st.error("Invalid credentials.")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Login", key="btn_login"):
+                user = verify_login(u, p)
+                if user:
+                    st.session_state.user = user
+                    st.rerun()
+                else:
+                    st.error("Invalid credentials.")
+        with c2:
+            if st.button("Reset default user (fix login)", key="btn_reset_default"):
+                try:
+                    reset_or_create_user(DEFAULT_USERNAME, DEFAULT_PASSWORD)
+                    st.cache_data.clear()
+                    st.success("Default user reset. Try: username 'venkat reddy', password '1234'.")
+                except Exception as e:
+                    st.error(f"Reset failed: {e}")
+
     st.stop()
 
 # Logged in – top-right logout
