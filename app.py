@@ -942,8 +942,9 @@ with tabs[6]:
         mv = moves.copy()
         mv["ts_dt"] = pd.to_datetime(mv["ts"], errors="coerce")
         mv = mv.dropna(subset=["ts_dt"])
-        mv["ts_dt"] = pd.to_datetime(mv["ts_dt"], errors="coerce")   # force datetime dtype
-        mv = mv[(mv["ts_dt"] >= pd.Timestamp(start)) & (mv["ts_dt"] <= pd.Timestamp(end))]
+        # no astype needed, already datetime64
+        start_dt, end_dt = pd.to_datetime(start), pd.to_datetime(end)
+        mv = mv[(mv["ts_dt"] >= start_dt) & (mv["ts_dt"] <= end_dt)]
         mv = mv.sort_values("ts_dt")
 
         prods = products_df().rename(columns={"name": "product_name", "size": "product_size"})
@@ -987,34 +988,27 @@ with tabs[6]:
             st.dataframe(cust.sort_values("Customer"), use_container_width=True)
 
     # ---- Payments Today ----
-pays = payments_df()
-if not pays.empty:
-    pp = pays.copy()
+    pays = payments_df()
+    if not pays.empty:
+        pp = pays.copy()
+        pp["ts_dt"] = pd.to_datetime(pp["ts"], errors="coerce")
+        pp = pp.dropna(subset=["ts_dt"])  # remove bad rows
+        # no astype needed
+        start_dt, end_dt = pd.to_datetime(start), pd.to_datetime(end)
+        pp = pp[(pp["ts_dt"] >= start_dt) & (pp["ts_dt"] <= end_dt)]
 
-    # Force ts_dt to datetime64
-    pp["ts_dt"] = pd.to_datetime(pp["ts"], errors="coerce")
-    pp = pp.dropna(subset=["ts_dt"])  # remove bad rows
-    pp["ts_dt"] = pp["ts_dt"].astype("datetime64[ns]")  # ensure correct dtype
+        if not pp.empty:
+            cdf = customers_df().rename(columns={"id": "cid"})
+            pp = pp.merge(cdf[["cid","name"]], left_on="customer_id", right_on="cid", how="left")
+            pp["time"] = pp["ts_dt"].dt.strftime("%H:%M")
 
-    # Convert start/end also to datetime64 for comparison
-    start_dt = pd.to_datetime(start)
-    end_dt   = pd.to_datetime(end)
-
-    pp = pp[(pp["ts_dt"] >= start_dt) & (pp["ts_dt"] <= end_dt)]
-
-    if not pp.empty:
-        cdf = customers_df().rename(columns={"id": "cid"})
-        pp = pp.merge(cdf[["cid","name"]], left_on="customer_id", right_on="cid", how="left")
-        pp["time"] = pp["ts_dt"].dt.strftime("%H:%M")
-
-        st.markdown("#### Payments / Advances Today")
-        st.dataframe(
-            pp[["time","name","kind","amount","notes"]].rename(
-                columns={"name": "Customer", "amount": "Amount"}
-            ),
-            use_container_width=True
-        )
-
+            st.markdown("#### Payments / Advances Today")
+            st.dataframe(
+                pp[["time","name","kind","amount","notes"]].rename(
+                    columns={"name": "Customer", "amount": "Amount"}
+                ),
+                use_container_width=True
+            )
 
     # ---- End-of-day Stock Snapshot ----
     prods2 = list_products()
