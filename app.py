@@ -941,8 +941,8 @@ with tabs[6]:
     if not moves.empty:
         mv = moves.copy()
         mv["ts_dt"] = pd.to_datetime(mv["ts"], errors="coerce")
-        mv = mv.dropna(subset=["ts_dt"])
-        # no astype needed, already datetime64
+        mv = mv[pd.notnull(mv["ts_dt"])]         # drop invalid rows
+        mv["ts_dt"] = mv["ts_dt"].astype("datetime64[ns]")  # enforce datetime
         start_dt, end_dt = pd.to_datetime(start), pd.to_datetime(end)
         mv = mv[(mv["ts_dt"] >= start_dt) & (mv["ts_dt"] <= end_dt)]
         mv = mv.sort_values("ts_dt")
@@ -992,8 +992,9 @@ with tabs[6]:
     if not pays.empty:
         pp = pays.copy()
         pp["ts_dt"] = pd.to_datetime(pp["ts"], errors="coerce")
-        pp = pp.dropna(subset=["ts_dt"])  # remove bad rows
-        # no astype needed
+        pp = pp[pd.notnull(pp["ts_dt"])]                  # drop invalids
+        pp["ts_dt"] = pp["ts_dt"].astype("datetime64[ns]")  # enforce dtype
+
         start_dt, end_dt = pd.to_datetime(start), pd.to_datetime(end)
         pp = pp[(pp["ts_dt"] >= start_dt) & (pp["ts_dt"] <= end_dt)]
 
@@ -1028,3 +1029,4 @@ with tabs[6]:
 st.divider()
 st.caption("Quick Bill uses a form that won’t refresh while typing. Click **Update Items** to apply changes. Per-row Amount and a grand Subtotal are shown for clarity.")
 st.caption("© 2023 Venkat Reddy. Inventory App for Tiles & Granite business.")
+
