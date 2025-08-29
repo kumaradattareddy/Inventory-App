@@ -941,8 +941,10 @@ with tabs[6]:
     if not moves.empty:
         mv = moves.copy()
         mv["ts_dt"] = pd.to_datetime(mv["ts"], errors="coerce")
-        mv = mv.dropna(subset=["ts_dt"])  # drop invalid timestamps
-        mv = mv[(mv["ts_dt"] >= pd.Timestamp(start)) & (mv["ts_dt"] <= pd.Timestamp(end))].sort_values("ts_dt")
+        mv = mv.dropna(subset=["ts_dt"])
+        mv["ts_dt"] = pd.to_datetime(mv["ts_dt"], errors="coerce")   # force datetime dtype
+        mv = mv[(mv["ts_dt"] >= pd.Timestamp(start)) & (mv["ts_dt"] <= pd.Timestamp(end))]
+        mv = mv.sort_values("ts_dt")
 
         prods = products_df().rename(columns={"name": "product_name", "size": "product_size"})
         custs = customers_df().rename(columns={"id": "cust_id", "name": "customer_name"})
@@ -989,7 +991,8 @@ with tabs[6]:
     if not pays.empty:
         pp = pays.copy()
         pp["ts_dt"] = pd.to_datetime(pp["ts"], errors="coerce")
-        pp = pp.dropna(subset=["ts_dt"])  # drop invalid timestamps
+        pp = pp.dropna(subset=["ts_dt"])
+        pp["ts_dt"] = pd.to_datetime(pp["ts_dt"], errors="coerce")   # force datetime dtype
         pp = pp[(pp["ts_dt"] >= pd.Timestamp(start)) & (pp["ts_dt"] <= pd.Timestamp(end))]
         if not pp.empty:
             cdf = customers_df().rename(columns={"id":"cid"})
