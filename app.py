@@ -928,6 +928,46 @@ with tabs[4]:
         st.dataframe(merged[["ts", "Customer", "kind", "amount", "notes"]], use_container_width=True)
     elif pays.empty:
         st.info("No payments yet.")
+# ===================== Stock & Low Stock =====================
+with tabs[5]:
+    st.subheader("Stock & Low Stock")
+
+    # global low-stock threshold (you can change default)
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        low_threshold = st.number_input("Low stock ≤", min_value=0.0, value=5.0, step=1.0)
+
+    prods = list_products()
+    if not prods:
+        st.info("No products yet. Add some via **Purchase (Stock In)** or the Quick Bill.")
+    else:
+        rows = []
+        for p in prods:
+            pid = int(p["id"])
+            stock_now = product_stock(pid)
+            status = "OK"
+            if stock_now < 0:
+                status = "NEGATIVE ⚠️"
+            elif stock_now <= low_threshold:
+                status = "LOW"
+
+            rows.append({
+                "Product": p["name"],
+                "Size": p.get("size"),
+                "Unit": p["unit"],
+                "Stock Left": round(float(stock_now), 2),
+                "Status": status,
+            })
+
+        df = pd.DataFrame(rows)
+
+        # sort: negatives first, then low, then others; then by Size/Product
+        status_order = {"NEGATIVE ⚠️": 0, "LOW": 1, "OK": 2}
+        df["__order"] = df["Status"].map(status_order).fillna(3).astype(int)
+        df = df.sort_values(["__order", "Size", "Product"], na_position="last").drop(columns="__order")
+
+        st.dataframe(df, use_container_width=True)
+        st.caption("Tip: adjust the 'Low stock ≤' value to change the LOW threshold.")
 
 # ===================== Daily Report =====================
 with tabs[6]:
