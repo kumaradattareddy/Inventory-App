@@ -940,12 +940,13 @@ with tabs[6]:
     moves = stock_moves_df()
     if not moves.empty:
         mv = moves.copy()
-        mv["ts_dt"] = pd.to_datetime(mv["ts"], errors="coerce")
-        mv = mv[pd.notnull(mv["ts_dt"])]         # drop invalid rows
-        mv["ts_dt"] = mv["ts_dt"].astype("datetime64[ns]")  # enforce datetime
-        start_dt, end_dt = pd.to_datetime(start), pd.to_datetime(end)
-        mv = mv[(mv["ts_dt"] >= start_dt) & (mv["ts_dt"] <= end_dt)]
-        mv = mv.sort_values("ts_dt")
+
+        # Parse timestamps as UTC and then drop tz -> naive
+        mv["ts_dt"] = pd.to_datetime(mv["ts"], errors="coerce", utc=True).dt.tz_localize(None)
+        mv = mv.dropna(subset=["ts_dt"])
+
+        start_dt, end_dt = pd.Timestamp(start), pd.Timestamp(end)  # naive bounds
+        mv = mv[(mv["ts_dt"] >= start_dt) & (mv["ts_dt"] <= end_dt)].sort_values("ts_dt")
 
         prods = products_df().rename(columns={"name": "product_name", "size": "product_size"})
         custs = customers_df().rename(columns={"id": "cust_id", "name": "customer_name"})
@@ -991,11 +992,12 @@ with tabs[6]:
     pays = payments_df()
     if not pays.empty:
         pp = pays.copy()
-        pp["ts_dt"] = pd.to_datetime(pp["ts"], errors="coerce")
-        pp = pp[pd.notnull(pp["ts_dt"])]                  # drop invalids
-        pp["ts_dt"] = pp["ts_dt"].astype("datetime64[ns]")  # enforce dtype
 
-        start_dt, end_dt = pd.to_datetime(start), pd.to_datetime(end)
+        # Parse as UTC and drop tz -> naive to match start/end
+        pp["ts_dt"] = pd.to_datetime(pp["ts"], errors="coerce", utc=True).dt.tz_localize(None)
+        pp = pp.dropna(subset=["ts_dt"])
+
+        start_dt, end_dt = pd.Timestamp(start), pd.Timestamp(end)
         pp = pp[(pp["ts_dt"] >= start_dt) & (pp["ts_dt"] <= end_dt)]
 
         if not pp.empty:
