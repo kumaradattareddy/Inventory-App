@@ -253,6 +253,7 @@ def add_payment(customer_id: int, kind: str, amount: float, notes: str = None,
     return True
 
 
+
 def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, supplier_id=None, notes=None,
              when: datetime | None = None, dedupe_window_seconds: int = 120) -> bool:
     """
@@ -935,19 +936,25 @@ with tabs[6]:
     start = datetime(day.year, day.month, day.day, 0, 0, 0)
     end   = datetime(day.year, day.month, day.day, 23, 59, 59)
 
+    # ---- Stock Moves ----
     moves = stock_moves_df()
     if not moves.empty:
         mv = moves.copy()
         mv["ts_dt"] = pd.to_datetime(mv["ts"], errors="coerce")
-        mv = mv[(mv["ts_dt"] >= start) & (mv["ts_dt"] <= end)].sort_values("ts_dt")
+        mv = mv.dropna(subset=["ts_dt"])  # drop invalid timestamps
+        mv = mv[(mv["ts_dt"] >= pd.Timestamp(start)) & (mv["ts_dt"] <= pd.Timestamp(end))].sort_values("ts_dt")
 
-        prods = products_df().rename(columns={"name":"product_name","size":"product_size"})
-        custs = customers_df().rename(columns={"id":"cust_id","name":"customer_name"})
-        sups  = suppliers_df().rename(columns={"id":"sup_id","name":"supplier_name"})
+        prods = products_df().rename(columns={"name": "product_name", "size": "product_size"})
+        custs = customers_df().rename(columns={"id": "cust_id", "name": "customer_name"})
+        sups  = suppliers_df().rename(columns={"id": "sup_id", "name": "supplier_name"})
 
-        rep = mv.merge(prods[["id","product_name","product_size","unit"]], left_on="product_id", right_on="id", how="left", suffixes=("","_p"))
+        rep = mv.merge(
+            prods[["id","product_name","product_size","unit"]],
+            left_on="product_id", right_on="id", how="left", suffixes=("","_p")
+        )
         rep = rep.merge(custs[["cust_id","customer_name"]], left_on="customer_id", right_on="cust_id", how="left")
         rep = rep.merge(sups[["sup_id","supplier_name"]], left_on="supplier_id", right_on="sup_id", how="left")
+
         rep["time"] = rep["ts_dt"].dt.strftime("%H:%M")
         rep["qty_display"] = rep.apply(lambda r: f'{abs(r["qty"])} {r.get("unit","")}', axis=1)
         rep["value"] = rep.apply(lambda r: (abs(r["qty"]) * (r["price_per_unit"] or 0.0)), axis=1)
@@ -977,21 +984,37 @@ with tabs[6]:
             cust["Customer"] = cust["Customer"].fillna("N/A")
             st.dataframe(cust.sort_values("Customer"), use_container_width=True)
 
-    # Payments today
+    # ---- Payments Today ----
     pays = payments_df()
     if not pays.empty:
-        pp = pays.copy(); pp["ts_dt"] = pd.to_datetime(pp["ts"], errors="coerce")
-        pp = pp[(pp["ts_dt"] >= start) & (pp["ts_dt"] <= end)]
+        pp = pays.copy()
+        pp["ts_dt"] = pd.to_datetime(pp["ts"], errors="coerce")
+        pp = pp.dropna(subset=["ts_dt"])  # drop invalid timestamps
+        pp = pp[(pp["ts_dt"] >= pd.Timestamp(start)) & (pp["ts_dt"] <= pd.Timestamp(end))]
         if not pp.empty:
             cdf = customers_df().rename(columns={"id":"cid"})
             pp = pp.merge(cdf[["cid","name"]], left_on="customer_id", right_on="cid", how="left")
             pp["time"] = pp["ts_dt"].dt.strftime("%H:%M")
             st.markdown("#### Payments / Advances Today")
-            st.dataframe(pp[["time","name","kind","amount","notes"]].rename(columns={"name":"Customer","amount":"Amount"}), use_container_width=True)
+            st.dataframe(
+                pp[["time","name","kind","amount","notes"]].rename(
+                    columns={"name":"Customer","amount":"Amount"}
+                ),
+                use_container_width=True
+            )
 
-    # End-of-day stock snapshot
+    # ---- End-of-day Stock Snapshot ----
     prods2 = list_products()
-    snap = [{"Product": p["name"], "Size": p.get("size"), "Unit": p["unit"], "Stock Left": product_stock(int(p["id"])), "Status": "NEGATIVE ⚠️" if product_stock(int(p["id"])) < 0 else ""} for p in prods2]
+    snap = [
+        {
+            "Product": p["name"],
+            "Size": p.get("size"),
+            "Unit": p["unit"],
+            "Stock Left": product_stock(int(p["id"])),
+            "Status": "NEGATIVE ⚠️" if product_stock(int(p["id"])) < 0 else ""
+        }
+        for p in prods2
+    ]
     st.markdown("#### Stock Snapshot (End of Day)")
     st.dataframe(pd.DataFrame(snap).sort_values(["Size","Product"], na_position="last"), use_container_width=True)
 
