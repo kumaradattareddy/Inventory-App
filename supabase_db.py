@@ -36,15 +36,10 @@ def _norm_name(name: str) -> str:
     return (name or "").strip().lower()
 
 def _canon(name: str) -> str:
-    """
-    Map any incoming table name to one of the canonical keys in TABLE_COLUMNS.
-    Accepts TitleCase and underscoreless forms, e.g. 'StockMoves' or 'stockmoves'.
-    """
     n = _norm_name(name)
     if n in TABLE_COLUMNS:
         return n
     compact = n.replace("_", "").replace("-", "")
-    # check synonyms (+ compact match)
     for canon, alts in SYNONYMS.items():
         all_names = [canon] + alts
         for a in all_names:
@@ -75,10 +70,7 @@ def _noneify(v: Any):
     return v
 
 def _client():
-    """
-    Lazily create client using current env (so os.environ can be populated at runtime).
-    Accepts SUPABASE_KEY, SUPABASE_ANON_KEY, or SUPABASE_SERVICE_ROLE_KEY.
-    """
+    """Lazily create client using current env (so os.environ can be populated at runtime)."""
     global _client_cache
     if _client_cache is not None:
         return _client_cache
@@ -90,10 +82,8 @@ def _client():
         or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         or ""
     )
-
     if not create_client or not url or not key:
         raise RuntimeError("Supabase credentials not configured (SUPABASE_URL / SUPABASE_KEY).")
-
     _client_cache = create_client(url, key)
     return _client_cache
 
@@ -130,13 +120,27 @@ def fetch_df(table_name: str) -> pd.DataFrame:
         print(f"[fetch_df] {t}: {e}")
         return pd.DataFrame(columns=TABLE_COLUMNS[t])
 
+# ---- internal: compute next id for tables that aren't identity ----
+def _next_id(table_name: str, sb: Client | None = None) -> int:
+    t = _canon(table_name)
+    sb = sb or _client()
+    try:
+        resp = sb.table(t).select("id").order("id", desc=True).limit(1).execute()
+        if resp.data and resp.data[0].get("id") is not None:
+            return int(resp.data[0]["id"]) + 1
+    except Exception:
+        pass
+    return 1
+
 def append_row(table_name: str, row_values: List[Any]) -> None:
     """
     Insert a single row. row_values must match the TABLE_COLUMNS order.
-    For identity ('GENERATED ALWAYS') id columns, we must OMIT 'id' entirely.
+    Smart handling of 'id' across tables:
+      * If 'id' is identity GENERATED ALWAYS → omit id.
+      * If 'id' is NOT NULL and not identity → compute next id and send it.
     """
     t = _canon(table_name)
-    sb = _client()  # let this raise if creds missing
+    sb = _client()
 
     cols = TABLE_COLUMNS[t]
     if len(row_values) != len(cols):
@@ -144,26 +148,59 @@ def append_row(table_name: str, row_values: List[Any]) -> None:
 
     rec = {c: _noneify(v) for c, v in zip(cols, row_values)}
 
-    # Handle id for identity columns: remove it unless it's a clean int we really want to send
+    # Normalize id field
+    include_id = False
     if "id" in rec:
         if _is_blank(rec["id"]):
-            rec.pop("id", None)  # OMIT 'id' → Postgres will auto-generate
+            include_id = False  # prefer to omit
         else:
             try:
                 rec["id"] = int(rec["id"])
+                include_id = True
             except Exception:
-                rec.pop("id", None)  # bad value → omit and let DB generate
+                include_id = False
 
+    payload_no_id = {k: v for k, v in rec.items() if k != "id"}
+    payload_with_id = rec
+
+    # helper to perform insert
+    def _insert(payload):
+        return sb.table(t).insert(payload).execute()
+
+    # 1) First attempt: if we *don't* trust id, try without id
     try:
-        _ = sb.table(t).insert(rec).execute()
-    except Exception as e:
-        raise RuntimeError(f"append_row failed for {t}: {e}") from e
+        _insert(payload_with_id if include_id else payload_no_id)
+        return
+    except Exception as e1:
+        msg = str(e1)
 
-# ---------- login reset helper ----------
+        # Identity ALWAYS complains when id is provided: 428C9 or "GENERATED ALWAYS"
+        if ('428C9' in msg) or ('GENERATED ALWAYS' in msg) or ('non-DEFAULT value into column \"id\"' in msg):
+            try:
+                _insert(payload_no_id)
+                return
+            except Exception as e2:
+                raise RuntimeError(f"append_row failed for {t}: {e2}") from e2
+
+        # Not-null id complains when omitted: 23502 or message text
+        if ('23502' in msg and 'column \"id\"' in msg) or ('null value in column \"id\"' in msg):
+            try:
+                nid = _next_id(t, sb)
+                payload_with_id2 = dict(payload_with_id)
+                payload_with_id2["id"] = nid
+                _insert(payload_with_id2)
+                return
+            except Exception as e2:
+                raise RuntimeError(f"append_row failed for {t}: {e2}") from e2
+
+        # Unknown error → bubble up
+        raise RuntimeError(f"append_row failed for {t}: {e1}") from e1
+
+# ---------- helpers used by the login reset button ----------
 def reset_or_create_user(username: str, password: str) -> None:
     """
     Ensure a user row exists for `username` with PBKDF2(password, salt, 100k).
-    If the user exists → UPDATE salt/hash. Otherwise → INSERT a new row (let DB generate id).
+    If the user exists → UPDATE salt/hash. Otherwise → INSERT a new row.
     """
     t = "users"
     sb = _client()
@@ -180,9 +217,5 @@ def reset_or_create_user(username: str, password: str) -> None:
     except Exception:
         pass
 
-    # Insert if missing (omit id — identity column)
-    sb.table(t).insert({
-        "username": u,
-        "salt": salt,
-        "password_hash": pwd_hash
-    }).execute()
+    # Insert if missing — let DB decide id strategy via append_row
+    append_row("users", [None, u, pwd_hash, salt])

@@ -5,8 +5,7 @@ import streamlit as st
 import hashlib, secrets
 from datetime import date, datetime, timedelta
 
-from pandas.api.types import is_datetime64_any_dtype, is_datetime64tz_dtype
-
+from pandas.api.types import is_datetime64tz_dtype
 from supabase_db import ensure_all_tabs, fetch_df, append_row, reset_or_create_user
 
 # ===================== App Config / Auth =====================
@@ -28,10 +27,8 @@ try:
     )
     if url and key:
         os.environ["SUPABASE_URL"] = url
-        # normalize to SUPABASE_KEY so the db layer finds it
         os.environ["SUPABASE_KEY"] = key
 except Exception:
-    # secrets might not be available locally; that's fine
     pass
 
 # ---------- Styling ----------
@@ -46,7 +43,7 @@ label { font-size: 18px !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ---- scheduled widget resets (prevents "cannot be modified after widget..." error) ----
+# ---- scheduled widget resets ----
 def _apply_scheduled_resets():
     keys = st.session_state.pop("_reset_keys", None)
     if keys:
@@ -59,7 +56,7 @@ def _schedule_reset(*keys):
     pending.update(keys)
     st.session_state["_reset_keys"] = list(pending)
 
-# ===================== Ensure tables exist (safe if creds missing) =====================
+# ===================== Ensure tables exist =====================
 try:
     ensure_all_tabs()
 except RuntimeError as e:
@@ -133,7 +130,6 @@ def user_exists(username: str) -> bool:
 def create_user(username: str, password: str):
     salt = secrets.token_hex(16)
     pwd_hash = _hash_password(password, salt)
-    # Let DB generate id
     append_row("users", [None, username.strip().lower(), pwd_hash, salt])
     _clear_caches()
 
@@ -152,7 +148,6 @@ def verify_login(username: str, password: str):
         return {"username": row["username"]}
     return None
 
-# Try to ensure default user exists (best-effort)
 if DEFAULT_USERNAME in ALLOWED_USERS and not user_exists(DEFAULT_USERNAME):
     try:
         create_user(DEFAULT_USERNAME, DEFAULT_PASSWORD)
@@ -190,7 +185,6 @@ def product_stock(product_id: int) -> float:
     return float(opening) + s
 
 def add_product(name, material, size, unit, opening_stock):
-    # Let DB generate id
     append_row("products", [
         None,
         (name or "").strip(),
@@ -226,34 +220,18 @@ def add_payment(customer_id: int, kind: str, amount: float, notes: str = None,
                 when: datetime | None = None, dedupe_window_seconds: int = 120) -> bool:
     if not customer_id or amount <= 0:
         return False
-
     ts_dt = (when or datetime.now())
     ts = ts_dt.isoformat(timespec="seconds")
-
     try:
-        append_row("payments", [
-            None,                # let Postgres auto-generate id
-            ts,
-            int(customer_id),
-            str(kind),
-            float(amount),
-            (notes or None)
-        ])
+        append_row("payments", [None, ts, int(customer_id), str(kind), float(amount), (notes or None)])
     except Exception as e:
         st.error(f"Supabase insert failed: {e}")
         return False
-
     _clear_caches()
     return True
 
-
 def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, supplier_id=None, notes=None,
              when: datetime | None = None, dedupe_window_seconds: int = 120) -> bool:
-    """
-    Insert a stock move. Returns True if inserted, False if skipped as duplicate.
-    For sales → pass customer_id; for purchases → pass supplier_id.
-    Dedupes identical moves within the last dedupe_window_seconds.
-    """
     ts_dt = (when or datetime.now())
     ins_qty = -qty if (kind == "sale" and qty > 0) else qty
 
@@ -263,7 +241,6 @@ def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, suppl
         if not df.empty:
             df = df.copy()
             df["ts_dt"] = pd.to_datetime(df["ts"], errors="coerce")
-
             kind_match  = df["kind"].astype("string").fillna("").eq((kind or ""))
             pid_match   = pd.to_numeric(df["product_id"], errors="coerce").eq(int(product_id))
             qty_match   = pd.to_numeric(df["qty"], errors="coerce").eq(float(ins_qty))
@@ -271,12 +248,8 @@ def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, suppl
             cust_match  = pd.to_numeric(df["customer_id"], errors="coerce").fillna(-1).eq(int(customer_id) if customer_id is not None else -1)
             supp_match  = pd.to_numeric(df["supplier_id"], errors="coerce").fillna(-1).eq(int(supplier_id) if supplier_id is not None else -1)
             notes_match = df["notes"].astype("string").fillna("").eq((notes or ""))
-
-            mask = ((df["ts_dt"] >= since) & kind_match & pid_match & qty_match &
-                    ppu_match & cust_match & supp_match & notes_match).fillna(False)
-
-            dup = df[mask]
-            if not dup.empty:
+            mask = ((df["ts_dt"] >= since) & kind_match & pid_match & qty_match & ppu_match & cust_match & supp_match & notes_match).fillna(False)
+            if not df[mask].empty:
                 return False
 
     ts = ts_dt.isoformat(timespec="seconds")
@@ -307,21 +280,17 @@ def get_product_by_name_size_unit(name: str, size: str, unit: str):
     return None if row.empty else row.iloc[0].to_dict()
 
 def ensure_product(name: str, size: str, unit: str, material: str = None, opening_stock: float = 0.0):
-    # Try find
     p = get_product_by_name_size_unit(name, size, unit)
     if p:
         return int(p["id"])
-    # Insert then re-fetch id
     add_product(name=name, material=material, size=size, unit=unit, opening_stock=opening_stock)
-    _clear_caches()
     df = products_df()
     n, s, u = products_lookup_key(name, size, unit)
-    mask = (
-        df["name"].astype("string").str.lower().fillna("").eq(n) &
-        df["unit"].astype("string").fillna("").eq(u) &
-        df["size"].astype("string").str.lower().fillna("").eq(s)
-    ).fillna(False)
-    row = df[mask]
+    row = df[
+        df["name"].astype("string").str.lower().eq(n) &
+        df["unit"].astype("string").eq(u) &
+        df["size"].astype("string").str.lower().eq(s)
+    ]
     return int(row.iloc[0]["id"]) if not row.empty else None
 
 def ensure_customer_by_name(name: str, phone: str = None, address: str = None):
@@ -334,7 +303,6 @@ def ensure_customer_by_name(name: str, phone: str = None, address: str = None):
         if not row.empty:
             return int(row.iloc[0]["id"])
     add_customer(nm, phone, address)
-    _clear_caches()
     df = customers_df()
     row = df[df["name"].astype(str).str.lower() == nm.lower()]
     return int(row.iloc[0]["id"]) if not row.empty else None
@@ -349,57 +317,13 @@ def ensure_supplier_by_name(name: str, phone: str = None, address: str = None):
         if not row.empty:
             return int(row.iloc[0]["id"])
     add_supplier(nm, phone, address)
-    _clear_caches()
     df = suppliers_df()
     row = df[df["name"].astype(str).str.lower() == nm.lower()]
     return int(row.iloc[0]["id"]) if not row.empty else None
 
-def customer_balance(customer_id: int) -> float:
-    """
-    Outstanding = Σ(sales amount) + Σ(opening_due) − Σ(payments) − Σ(advances).
-    Negative result means advance/credit available.
-    """
-    if not customer_id:
-        return 0.0
-
-    mv = stock_moves_df()
-    sales_total = 0.0
-    if not mv.empty:
-        s = mv[(mv["kind"] == "sale") & (mv["customer_id"] == int(customer_id))].copy()
-        if not s.empty:
-            s["price_per_unit"] = pd.to_numeric(s["price_per_unit"], errors="coerce").fillna(0.0)
-            s["qty"] = pd.to_numeric(s["qty"], errors="coerce").fillna(0.0).abs()
-            sales_total = float((s["qty"] * s["price_per_unit"]).sum())
-
-    pay = payments_df()
-    opening_due = payments = advances = 0.0
-    if not pay.empty:
-        p = pay[pay["customer_id"] == int(customer_id)]
-        opening_due = float(p[p["kind"] == "opening_due"]["amount"].sum() or 0.0)
-        payments    = float(p[p["kind"] == "payment"]["amount"].sum() or 0.0)
-        advances    = float(p[p["kind"] == "advance"]["amount"].sum() or 0.0)
-
-    return round(sales_total + opening_due - payments - advances, 2)
-
-# ---- Helper for safe amount parsing ----
-def parse_amount(txt: str) -> float | None:
-    """
-    Convert a string like '1000.50' or '1,000.50' to float.
-    Returns None if invalid.
-    """
-    txt = (txt or "").strip()
-    if not txt:
-        return 0.0
-    try:
-        return float(txt.replace(",", ""))
-    except ValueError:
-        return None
-
-# ---- Timestamp normalization helper (naive datetime64[ns]) ----
 def _normalize_ts(series: pd.Series) -> pd.Series:
     s = pd.to_datetime(series, errors="coerce")
     if is_datetime64tz_dtype(s):
-        # drop timezone to compare with naive start/end
         s = s.dt.tz_localize(None)
     return s
 
