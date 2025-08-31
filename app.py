@@ -513,8 +513,19 @@ with tabs[0]:
     custs_df = customers_df()
     if not custs_df.empty:
         show = custs_df.copy()
-        show["Balance (+due / −adv)"] = show["id"].astype(int).apply(customer_balance)
-        st.dataframe(show[["id","name","phone","address","Balance (+due / −adv)"]], use_container_width=True)
+
+        # local wrapper avoids scoping glitches and handles errors
+        def _safe_balance(cid) -> float:
+            try:
+                return customer_balance(int(cid))
+            except Exception:
+                return 0.0
+
+        show["Balance (+due / −adv)"] = show["id"].apply(_safe_balance)
+        st.dataframe(
+            show[["id","name","phone","address","Balance (+due / −adv)"]],
+            use_container_width=True
+        )
     else:
         st.info("No customers yet.")
 
