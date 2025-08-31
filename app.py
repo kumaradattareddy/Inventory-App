@@ -326,6 +326,46 @@ def _normalize_ts(series: pd.Series) -> pd.Series:
     if is_datetime64tz_dtype(s):
         s = s.dt.tz_localize(None)
     return s
+# ---- Balances & parsing helpers (MUST be defined before UI uses them) ----
+def customer_balance(customer_id: int) -> float:
+    """
+    Outstanding = Σ(sales amount) + Σ(opening_due) − Σ(payments) − Σ(advances).
+    Negative means advance/credit available.
+    """
+    if not customer_id:
+        return 0.0
+
+    mv = stock_moves_df()
+    sales_total = 0.0
+    if not mv.empty:
+        s = mv[(mv["kind"] == "sale") & (mv["customer_id"] == int(customer_id))].copy()
+        if not s.empty:
+            s["price_per_unit"] = pd.to_numeric(s["price_per_unit"], errors="coerce").fillna(0.0)
+            s["qty"] = pd.to_numeric(s["qty"], errors="coerce").fillna(0.0).abs()
+            sales_total = float((s["qty"] * s["price_per_unit"]).sum())
+
+    pay = payments_df()
+    opening_due = payments = advances = 0.0
+    if not pay.empty:
+        p = pay[pay["customer_id"] == int(customer_id)]
+        opening_due = float(pd.to_numeric(p[p["kind"] == "opening_due"]["amount"], errors="coerce").fillna(0.0).sum())
+        payments    = float(pd.to_numeric(p[p["kind"] == "payment"]["amount"],     errors="coerce").fillna(0.0).sum())
+        advances    = float(pd.to_numeric(p[p["kind"] == "advance"]["amount"],     errors="coerce").fillna(0.0).sum())
+
+    return round(sales_total + opening_due - payments - advances, 2)
+
+def parse_amount(txt: str) -> float | None:
+    """
+    Convert '1000', '1,000.50' to float.
+    Returns 0.0 for blank; None if invalid.
+    """
+    s = "" if txt is None else str(txt).strip()
+    if s == "":
+        return 0.0
+    try:
+        return float(s.replace(",", ""))
+    except Exception:
+        return None
 
 # ===================== UI =====================
 st.title("Tiles & Granite Inventory")
