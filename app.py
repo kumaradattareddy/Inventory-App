@@ -5,6 +5,8 @@ import streamlit as st
 import hashlib, secrets
 from datetime import date, datetime, timedelta
 
+from pandas.api.types import is_datetime64_any_dtype, is_datetime64tz_dtype
+
 from supabase_db import ensure_all_tabs, fetch_df, append_row, reset_or_create_user
 
 # ===================== App Config / Auth =====================
@@ -120,12 +122,6 @@ def _hash_password(password: str, salt: str) -> str:
     dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), 100_000)
     return dk.hex()
 
-def _next_id(tab: str) -> int:
-    df = fetch_df(tab)
-    if df.empty or "id" not in df.columns:
-        return 1
-    return int(pd.to_numeric(df["id"], errors="coerce").fillna(0).max()) + 1
-
 def user_exists(username: str) -> bool:
     df = users_df()
     if df.empty:
@@ -137,8 +133,8 @@ def user_exists(username: str) -> bool:
 def create_user(username: str, password: str):
     salt = secrets.token_hex(16)
     pwd_hash = _hash_password(password, salt)
-    new_id = _next_id("users")
-    append_row("users", [new_id, username.strip().lower(), pwd_hash, salt])
+    # Let DB generate id
+    append_row("users", [None, username.strip().lower(), pwd_hash, salt])
     _clear_caches()
 
 def verify_login(username: str, password: str):
@@ -194,9 +190,9 @@ def product_stock(product_id: int) -> float:
     return float(opening) + s
 
 def add_product(name, material, size, unit, opening_stock):
-    new_id = _next_id("products")
+    # Let DB generate id
     append_row("products", [
-        new_id,
+        None,
         (name or "").strip(),
         (material or "").strip() or None,
         (size or "").strip() or None,
@@ -204,29 +200,27 @@ def add_product(name, material, size, unit, opening_stock):
         float(opening_stock or 0.0)
     ])
     _clear_caches()
-    return new_id
+    return True
 
 def add_customer(name, phone, address):
-    new_id = _next_id("customers")
     append_row("customers", [
-        new_id,
+        None,
         (name or "").strip(),
         (phone or "").strip() or None,
         (address or "").strip() or None
     ])
     _clear_caches()
-    return new_id
+    return True
 
 def add_supplier(name, phone, address):
-    new_id = _next_id("suppliers")
     append_row("suppliers", [
-        new_id,
+        None,
         (name or "").strip(),
         (phone or "").strip() or None,
         (address or "").strip() or None
     ])
     _clear_caches()
-    return new_id
+    return True
 
 def add_payment(customer_id: int, kind: str, amount: float, notes: str = None,
                 when: datetime | None = None, dedupe_window_seconds: int = 120) -> bool:
@@ -251,7 +245,6 @@ def add_payment(customer_id: int, kind: str, amount: float, notes: str = None,
 
     _clear_caches()
     return True
-
 
 
 def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, supplier_id=None, notes=None,
@@ -286,10 +279,9 @@ def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, suppl
             if not dup.empty:
                 return False
 
-    new_id = _next_id("stock_moves")
     ts = ts_dt.isoformat(timespec="seconds")
     append_row("stock_moves", [
-        new_id, ts, kind, int(product_id), float(ins_qty),
+        None, ts, kind, int(product_id), float(ins_qty),
         (float(price_per_unit) if price_per_unit not in (None, "") else None),
         (int(customer_id) if customer_id not in (None, "") else None),
         (int(supplier_id) if supplier_id not in (None, "") else None),
@@ -315,10 +307,22 @@ def get_product_by_name_size_unit(name: str, size: str, unit: str):
     return None if row.empty else row.iloc[0].to_dict()
 
 def ensure_product(name: str, size: str, unit: str, material: str = None, opening_stock: float = 0.0):
+    # Try find
     p = get_product_by_name_size_unit(name, size, unit)
     if p:
         return int(p["id"])
-    return add_product(name=name, material=material, size=size, unit=unit, opening_stock=opening_stock)
+    # Insert then re-fetch id
+    add_product(name=name, material=material, size=size, unit=unit, opening_stock=opening_stock)
+    _clear_caches()
+    df = products_df()
+    n, s, u = products_lookup_key(name, size, unit)
+    mask = (
+        df["name"].astype("string").str.lower().fillna("").eq(n) &
+        df["unit"].astype("string").fillna("").eq(u) &
+        df["size"].astype("string").str.lower().fillna("").eq(s)
+    ).fillna(False)
+    row = df[mask]
+    return int(row.iloc[0]["id"]) if not row.empty else None
 
 def ensure_customer_by_name(name: str, phone: str = None, address: str = None):
     nm = (name or "").strip()
@@ -329,7 +333,11 @@ def ensure_customer_by_name(name: str, phone: str = None, address: str = None):
         row = df[df["name"].astype(str).str.lower() == nm.lower()]
         if not row.empty:
             return int(row.iloc[0]["id"])
-    return add_customer(nm, phone, address)
+    add_customer(nm, phone, address)
+    _clear_caches()
+    df = customers_df()
+    row = df[df["name"].astype(str).str.lower() == nm.lower()]
+    return int(row.iloc[0]["id"]) if not row.empty else None
 
 def ensure_supplier_by_name(name: str, phone: str = None, address: str = None):
     nm = (name or "").strip()
@@ -340,7 +348,11 @@ def ensure_supplier_by_name(name: str, phone: str = None, address: str = None):
         row = df[df["name"].astype(str).str.lower() == nm.lower()]
         if not row.empty:
             return int(row.iloc[0]["id"])
-    return add_supplier(nm, phone, address)
+    add_supplier(nm, phone, address)
+    _clear_caches()
+    df = suppliers_df()
+    row = df[df["name"].astype(str).str.lower() == nm.lower()]
+    return int(row.iloc[0]["id"]) if not row.empty else None
 
 def customer_balance(customer_id: int) -> float:
     """
@@ -369,14 +381,6 @@ def customer_balance(customer_id: int) -> float:
 
     return round(sales_total + opening_due - payments - advances, 2)
 
-def _to_float(txt: str) -> float:
-    s = (txt or "").strip()
-    if not s:
-        return 0.0
-    try:
-        return float(s)
-    except:
-        return 0.0
 # ---- Helper for safe amount parsing ----
 def parse_amount(txt: str) -> float | None:
     """
@@ -390,6 +394,14 @@ def parse_amount(txt: str) -> float | None:
         return float(txt.replace(",", ""))
     except ValueError:
         return None
+
+# ---- Timestamp normalization helper (naive datetime64[ns]) ----
+def _normalize_ts(series: pd.Series) -> pd.Series:
+    s = pd.to_datetime(series, errors="coerce")
+    if is_datetime64tz_dtype(s):
+        # drop timezone to compare with naive start/end
+        s = s.dt.tz_localize(None)
+    return s
 
 # ===================== UI =====================
 st.title("Tiles & Granite Inventory")
@@ -854,7 +866,6 @@ with tabs[3]:
         except Exception as e:
             st.error(f"Error: {e}")
 
-
 # ===================== Payments & Balances =====================
 with tabs[4]:
     st.subheader("Record Payment / Opening Due")
@@ -928,46 +939,6 @@ with tabs[4]:
         st.dataframe(merged[["ts", "Customer", "kind", "amount", "notes"]], use_container_width=True)
     elif pays.empty:
         st.info("No payments yet.")
-# ===================== Stock & Low Stock =====================
-with tabs[5]:
-    st.subheader("Stock & Low Stock")
-
-    # global low-stock threshold (you can change default)
-    c1, c2 = st.columns([1, 3])
-    with c1:
-        low_threshold = st.number_input("Low stock ≤", min_value=0.0, value=5.0, step=1.0)
-
-    prods = list_products()
-    if not prods:
-        st.info("No products yet. Add some via **Purchase (Stock In)** or the Quick Bill.")
-    else:
-        rows = []
-        for p in prods:
-            pid = int(p["id"])
-            stock_now = product_stock(pid)
-            status = "OK"
-            if stock_now < 0:
-                status = "NEGATIVE ⚠️"
-            elif stock_now <= low_threshold:
-                status = "LOW"
-
-            rows.append({
-                "Product": p["name"],
-                "Size": p.get("size"),
-                "Unit": p["unit"],
-                "Stock Left": round(float(stock_now), 2),
-                "Status": status,
-            })
-
-        df = pd.DataFrame(rows)
-
-        # sort: negatives first, then low, then others; then by Size/Product
-        status_order = {"NEGATIVE ⚠️": 0, "LOW": 1, "OK": 2}
-        df["__order"] = df["Status"].map(status_order).fillna(3).astype(int)
-        df = df.sort_values(["__order", "Size", "Product"], na_position="last").drop(columns="__order")
-
-        st.dataframe(df, use_container_width=True)
-        st.caption("Tip: adjust the 'Low stock ≤' value to change the LOW threshold.")
 
 # ===================== Daily Report =====================
 with tabs[6]:
@@ -980,13 +951,11 @@ with tabs[6]:
     moves = stock_moves_df()
     if not moves.empty:
         mv = moves.copy()
-
-        # Parse timestamps as UTC and then drop tz -> naive
-        mv["ts_dt"] = pd.to_datetime(mv["ts"], errors="coerce", utc=True).dt.tz_localize(None)
+        mv["ts_dt"] = _normalize_ts(mv["ts"])
         mv = mv.dropna(subset=["ts_dt"])
-
-        start_dt, end_dt = pd.Timestamp(start), pd.Timestamp(end)  # naive bounds
-        mv = mv[(mv["ts_dt"] >= start_dt) & (mv["ts_dt"] <= end_dt)].sort_values("ts_dt")
+        start_dt = pd.Timestamp(start)
+        end_dt   = pd.Timestamp(end)
+        mv = mv[mv["ts_dt"].between(start_dt, end_dt, inclusive="both")].sort_values("ts_dt")
 
         prods = products_df().rename(columns={"name": "product_name", "size": "product_size"})
         custs = customers_df().rename(columns={"id": "cust_id", "name": "customer_name"})
@@ -1032,23 +1001,19 @@ with tabs[6]:
     pays = payments_df()
     if not pays.empty:
         pp = pays.copy()
-
-        # Parse as UTC and drop tz -> naive to match start/end
-        pp["ts_dt"] = pd.to_datetime(pp["ts"], errors="coerce", utc=True).dt.tz_localize(None)
+        pp["ts_dt"] = _normalize_ts(pp["ts"])
         pp = pp.dropna(subset=["ts_dt"])
-
-        start_dt, end_dt = pd.Timestamp(start), pd.Timestamp(end)
-        pp = pp[(pp["ts_dt"] >= start_dt) & (pp["ts_dt"] <= end_dt)]
-
+        start_dt = pd.Timestamp(start)
+        end_dt   = pd.Timestamp(end)
+        pp = pp[pp["ts_dt"].between(start_dt, end_dt, inclusive="both")]
         if not pp.empty:
-            cdf = customers_df().rename(columns={"id": "cid"})
+            cdf = customers_df().rename(columns={"id":"cid"})
             pp = pp.merge(cdf[["cid","name"]], left_on="customer_id", right_on="cid", how="left")
             pp["time"] = pp["ts_dt"].dt.strftime("%H:%M")
-
             st.markdown("#### Payments / Advances Today")
             st.dataframe(
                 pp[["time","name","kind","amount","notes"]].rename(
-                    columns={"name": "Customer", "amount": "Amount"}
+                    columns={"name":"Customer","amount":"Amount"}
                 ),
                 use_container_width=True
             )
@@ -1071,4 +1036,3 @@ with tabs[6]:
 st.divider()
 st.caption("Quick Bill uses a form that won’t refresh while typing. Click **Update Items** to apply changes. Per-row Amount and a grand Subtotal are shown for clarity.")
 st.caption("© 2023 Venkat Reddy. Inventory App for Tiles & Granite business.")
-

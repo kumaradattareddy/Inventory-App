@@ -17,8 +17,7 @@ TABLE_COLUMNS: Dict[str, List[str]] = {
     "customers":   ["id", "name", "phone", "address"],
     "suppliers":   ["id", "name", "phone", "address"],
     "payments":    ["id", "ts", "customer_id", "kind", "amount", "notes"],
-    "stock_moves": ["id", "ts", "kind", "product_id", "qty", "price_per_unit",
-                    "customer_id", "supplier_id", "notes"],
+    "stock_moves": ["id", "ts", "kind", "product_id", "qty", "price_per_unit", "customer_id", "supplier_id", "notes"],
 }
 
 # Allow legacy names / variants (TitleCase, no-underscore, etc.)
@@ -37,10 +36,15 @@ def _norm_name(name: str) -> str:
     return (name or "").strip().lower()
 
 def _canon(name: str) -> str:
+    """
+    Map any incoming table name to one of the canonical keys in TABLE_COLUMNS.
+    Accepts TitleCase and underscoreless forms, e.g. 'StockMoves' or 'stockmoves'.
+    """
     n = _norm_name(name)
     if n in TABLE_COLUMNS:
         return n
     compact = n.replace("_", "").replace("-", "")
+    # check synonyms (+ compact match)
     for canon, alts in SYNONYMS.items():
         all_names = [canon] + alts
         for a in all_names:
@@ -60,6 +64,7 @@ def _is_blank(v: Any) -> bool:
         return False
 
 def _noneify(v: Any):
+    """Convert pd.NA/NaN/'' to None to keep PostgREST happy."""
     try:
         if pd.isna(v):
             return None
@@ -70,6 +75,10 @@ def _noneify(v: Any):
     return v
 
 def _client():
+    """
+    Lazily create client using current env (so os.environ can be populated at runtime).
+    Accepts SUPABASE_KEY, SUPABASE_ANON_KEY, or SUPABASE_SERVICE_ROLE_KEY.
+    """
     global _client_cache
     if _client_cache is not None:
         return _client_cache
@@ -81,6 +90,7 @@ def _client():
         or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         or ""
     )
+
     if not create_client or not url or not key:
         raise RuntimeError("Supabase credentials not configured (SUPABASE_URL / SUPABASE_KEY).")
 
@@ -88,6 +98,7 @@ def _client():
     return _client_cache
 
 def ensure_all_tabs():
+    """Best-effort 'touch' of tables; no crash if creds missing."""
     try:
         sb = _client()
     except RuntimeError as e:
@@ -122,55 +133,55 @@ def fetch_df(table_name: str) -> pd.DataFrame:
 def append_row(table_name: str, row_values: List[Any]) -> None:
     """
     Insert a single row. row_values must match the TABLE_COLUMNS order.
-    For identity (auto) columns like id, pass None and it will be omitted.
+    For identity ('GENERATED ALWAYS') id columns, we must OMIT 'id' entirely.
     """
     t = _canon(table_name)
-    sb = _client()
+    sb = _client()  # let this raise if creds missing
 
     cols = TABLE_COLUMNS[t]
     if len(row_values) != len(cols):
         raise ValueError(f"append_row: expected {len(cols)} values for table {t}, got {len(row_values)}")
 
-    rec = {}
-    for c, v in zip(cols, row_values):
-        v = _noneify(v)
-        if c == "id" and v is None:   # skip auto identity id
-            continue
-        rec[c] = v
+    rec = {c: _noneify(v) for c, v in zip(cols, row_values)}
+
+    # Handle id for identity columns: remove it unless it's a clean int we really want to send
+    if "id" in rec:
+        if _is_blank(rec["id"]):
+            rec.pop("id", None)  # OMIT 'id' → Postgres will auto-generate
+        else:
+            try:
+                rec["id"] = int(rec["id"])
+            except Exception:
+                rec.pop("id", None)  # bad value → omit and let DB generate
 
     try:
         _ = sb.table(t).insert(rec).execute()
     except Exception as e:
         raise RuntimeError(f"append_row failed for {t}: {e}") from e
 
-def _next_id(table_name: str) -> int:
-    t = _canon(table_name)
-    sb = _client()
-    try:
-        resp = sb.table(t).select("id").order("id", desc=True).limit(1).execute()
-        if resp.data and resp.data[0].get("id") is not None:
-            return int(resp.data[0]["id"]) + 1
-    except Exception:
-        pass
-    return 1
-
+# ---------- login reset helper ----------
 def reset_or_create_user(username: str, password: str) -> None:
+    """
+    Ensure a user row exists for `username` with PBKDF2(password, salt, 100k).
+    If the user exists → UPDATE salt/hash. Otherwise → INSERT a new row (let DB generate id).
+    """
     t = "users"
     sb = _client()
     u = (username or "").strip().lower()
+
     salt = secrets.token_hex(16)
     pwd_hash = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), 100_000).hex()
 
+    # Try update first
     try:
         resp = sb.table(t).update({"salt": salt, "password_hash": pwd_hash}).eq("username", u).execute()
-        if getattr(resp, "data", None):
+        if getattr(resp, "data", None):  # updated existing row
             return
     except Exception:
         pass
 
-    new_id = _next_id(t)
+    # Insert if missing (omit id — identity column)
     sb.table(t).insert({
-        "id": new_id,
         "username": u,
         "salt": salt,
         "password_hash": pwd_hash
