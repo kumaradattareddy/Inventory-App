@@ -256,7 +256,7 @@ def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, suppl
             ppu_match   = pd.to_numeric(df["price_per_unit"], errors="coerce").fillna(0.0).eq(float(price_per_unit or 0.0))
             cust_match  = pd.to_numeric(df["customer_id"], errors="coerce").fillna(-1).eq(int(customer_id) if customer_id is not None else -1)
             notes_match = df["notes"].astype("string").fillna("").eq((notes or ""))
-            mask = ((df["ts_dt"] >= since) & kind_match & pid_match & qty_match & ppu_match & cust_match & supp_match & notes_match).fillna(False)
+            mask = ((df["ts_dt"] >= since) & kind_match & pid_match & qty_match & ppu_match & cust_match & notes_match).fillna(False)
             if not df[mask].empty:
                 return False
 
