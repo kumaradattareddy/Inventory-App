@@ -216,14 +216,23 @@ def add_supplier(name, phone, address):
     _clear_caches()
     return True
 
-def add_payment(customer_id: int, kind: str, amount: float, notes: str = None,
+def add_payment(customer_id: int | None, kind: str, amount: float,
+                supplier_id: int | None = None, notes: str = None,
                 when: datetime | None = None, dedupe_window_seconds: int = 120) -> bool:
-    if not customer_id or amount <= 0:
+    if (not customer_id and not supplier_id) or amount <= 0:
         return False
     ts_dt = (when or datetime.now())
     ts = ts_dt.isoformat(timespec="seconds")
     try:
-        append_row("payments", [None, ts, int(customer_id), str(kind), float(amount), (notes or None)])
+        append_row("payments", [
+            None,
+            ts,
+            (int(customer_id) if customer_id else None),
+            (int(supplier_id) if supplier_id else None),
+            str(kind),
+            float(amount),
+            (notes or None)
+        ])
     except Exception as e:
         st.error(f"Supabase insert failed: {e}")
         return False
@@ -366,6 +375,30 @@ def parse_amount(txt: str) -> float | None:
         return float(s.replace(",", ""))
     except Exception:
         return None
+def supplier_balance(supplier_id: int) -> float:
+    """
+    Supplier balance = Σ(purchases amount) − Σ(payments made).
+    Positive → you owe supplier. Negative → advance given.
+    """
+    if not supplier_id:
+        return 0.0
+
+    mv = stock_moves_df()
+    purchases_total = 0.0
+    if not mv.empty:
+        s = mv[(mv["kind"] == "purchase") & (mv["supplier_id"] == int(supplier_id))].copy()
+        if not s.empty:
+            s["price_per_unit"] = pd.to_numeric(s["price_per_unit"], errors="coerce").fillna(0.0)
+            s["qty"] = pd.to_numeric(s["qty"], errors="coerce").fillna(0.0).abs()
+            purchases_total = float((s["qty"] * s["price_per_unit"]).sum())
+
+    pay = payments_df()
+    payments = 0.0
+    if not pay.empty:
+        p = pay[pay["supplier_id"] == int(supplier_id)]
+        payments = float(pd.to_numeric(p[p["kind"] == "payment"]["amount"], errors="coerce").fillna(0.0).sum())
+
+    return round(purchases_total - payments, 2)
 
 # ===================== UI =====================
 st.title("Tiles & Granite Inventory")
@@ -585,10 +618,20 @@ with tabs[1]:
             st.rerun()
 
     st.divider()
-    st.subheader("All Suppliers")
+    st.subheader("All Suppliers (with balance)")
     sups_df = suppliers_df()
     if not sups_df.empty:
-        st.dataframe(sups_df[["id","name","phone","address"]], use_container_width=True)
+        show = sups_df.copy()
+        def _safe_sup_balance(sid) -> float:
+            try:
+                return supplier_balance(int(sid))
+            except Exception:
+                return 0.0
+        show["Balance (you owe / −adv)"] = show["id"].apply(_safe_sup_balance)
+        st.dataframe(
+            show[["id","name","phone","address","Balance (you owe / −adv)"]],
+            use_container_width=True
+        )
     else:
         st.info("No suppliers yet.")
 
@@ -946,7 +989,10 @@ with tabs[6]:
         rep["time"] = rep["ts_dt"].dt.strftime("%H:%M")
         rep["qty_display"] = rep.apply(lambda r: f'{abs(r["qty"])} {r.get("unit","")}', axis=1)
         rep["value"] = rep.apply(lambda r: (abs(r["qty"]) * (r["price_per_unit"] or 0.0)), axis=1)
-        rep["Party"] = rep.apply(lambda r: r["customer_name"] if r["kind"]=="sale" else r.get("supplier_name"), axis=1)
+        rep["Party"] = rep.apply(
+            lambda r: r["customer_name"] if r["kind"]=="sale" else r.get("supplier_name"),
+            axis=1
+        )
 
         st.markdown("#### Movements Today")
         show = rep[["time","kind","product_name","product_size","qty_display","Party","price_per_unit","value","notes"]]
@@ -972,7 +1018,7 @@ with tabs[6]:
             cust["Customer"] = cust["Customer"].fillna("N/A")
             st.dataframe(cust.sort_values("Customer"), use_container_width=True)
 
-    # ---- Payments Today ----
+    # ---- Payments Today (Customers + Suppliers) ----
     pays = payments_df()
     if not pays.empty:
         pp = pays.copy()
@@ -983,13 +1029,18 @@ with tabs[6]:
         pp = pp[pp["ts_dt"].between(start_dt, end_dt, inclusive="both")]
         if not pp.empty:
             cdf = customers_df().rename(columns={"id":"cid"})
+            sdf = suppliers_df().rename(columns={"id":"sid"})
             pp = pp.merge(cdf[["cid","name"]], left_on="customer_id", right_on="cid", how="left")
+            pp = pp.merge(sdf[["sid","name"]].rename(columns={"name":"supplier_name"}),
+                          left_on="supplier_id", right_on="sid", how="left")
+            pp["Party"] = pp.apply(
+                lambda r: r["name"] if pd.notna(r["name"]) else r["supplier_name"],
+                axis=1
+            )
             pp["time"] = pp["ts_dt"].dt.strftime("%H:%M")
             st.markdown("#### Payments / Advances Today")
             st.dataframe(
-                pp[["time","name","kind","amount","notes"]].rename(
-                    columns={"name":"Customer","amount":"Amount"}
-                ),
+                pp[["time","Party","kind","amount","notes"]].rename(columns={"amount":"Amount"}),
                 use_container_width=True
             )
 
