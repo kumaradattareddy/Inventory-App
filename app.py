@@ -105,7 +105,7 @@ def payments_df():
 def stock_moves_df():
     df = fetch_df("stock_moves")
     if not df.empty:
-        for col in ["id", "product_id", "customer_id", "supplier_id"]:
+        for col in ["id", "product_id", "customer_id"]:
             df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
         df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0.0)
         df["price_per_unit"] = pd.to_numeric(df["price_per_unit"], errors="coerce").fillna(0.0)
@@ -255,7 +255,6 @@ def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, suppl
             qty_match   = pd.to_numeric(df["qty"], errors="coerce").eq(float(ins_qty))
             ppu_match   = pd.to_numeric(df["price_per_unit"], errors="coerce").fillna(0.0).eq(float(price_per_unit or 0.0))
             cust_match  = pd.to_numeric(df["customer_id"], errors="coerce").fillna(-1).eq(int(customer_id) if customer_id is not None else -1)
-            supp_match  = pd.to_numeric(df["supplier_id"], errors="coerce").fillna(-1).eq(int(supplier_id) if supplier_id is not None else -1)
             notes_match = df["notes"].astype("string").fillna("").eq((notes or ""))
             mask = ((df["ts_dt"] >= since) & kind_match & pid_match & qty_match & ppu_match & cust_match & supp_match & notes_match).fillna(False)
             if not df[mask].empty:
@@ -263,12 +262,12 @@ def add_move(kind, product_id, qty, price_per_unit=None, customer_id=None, suppl
 
     ts = ts_dt.isoformat(timespec="seconds")
     append_row("stock_moves", [
-        None, ts, kind, int(product_id), float(ins_qty),
-        (float(price_per_unit) if price_per_unit not in (None, "") else None),
-        (int(customer_id) if customer_id not in (None, "") else None),
-        (int(supplier_id) if supplier_id not in (None, "") else None),
-        (notes or None)
-    ])
+    None, ts, kind, int(product_id), float(ins_qty),
+    (float(price_per_unit) if price_per_unit not in (None, "") else None),
+    (int(customer_id) if customer_id not in (None, "") else None),
+    (notes or None)
+])
+
     _clear_caches()
     return True
 
@@ -984,7 +983,6 @@ with tabs[6]:
             left_on="product_id", right_on="id", how="left", suffixes=("","_p")
         )
         rep = rep.merge(custs[["cust_id","customer_name"]], left_on="customer_id", right_on="cust_id", how="left")
-        rep = rep.merge(sups[["sup_id","supplier_name"]], left_on="supplier_id", right_on="sup_id", how="left")
 
         rep["time"] = rep["ts_dt"].dt.strftime("%H:%M")
         rep["qty_display"] = rep.apply(lambda r: f'{abs(r["qty"])} {r.get("unit","")}', axis=1)

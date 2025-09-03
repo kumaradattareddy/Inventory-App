@@ -17,7 +17,7 @@ TABLE_COLUMNS: Dict[str, List[str]] = {
     "customers":   ["id", "name", "phone", "address"],
     "suppliers":   ["id", "name", "phone", "address"],
     "payments":    ["id", "ts", "customer_id", "supplier_id", "kind", "amount", "notes"],  # ✅ supplier_id added
-    "stock_moves": ["id", "ts", "kind", "product_id", "qty", "price_per_unit", "customer_id", "supplier_id", "notes"],
+    "stock_moves": ["id", "ts", "kind", "product_id", "qty", "price_per_unit", "customer_id", "notes"],
 }
 
 # Allow legacy names / variants
